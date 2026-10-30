@@ -15,6 +15,10 @@ const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
 const CHASSIS: &str = "/redfish/v1/Chassis/System.Embedded.1";
 const SEL_SERVICE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Sel";
 const SEL_ENTRIES: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Sel";
+const LC_SERVICE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Lclog";
+const LC_ENTRIES: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Lclog";
+pub const SYSTEM_PATH: &str = SYSTEM;
+pub const CHASSIS_PATH: &str = CHASSIS;
 
 /// Redfish health, ordered from best to worst so `max()` gives the overall state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -267,6 +271,28 @@ impl Redfish {
         Ok(report)
     }
 
+    /// Every component and sensor, read in one go (the Health tab reads the same steps
+    /// one by one to show progress).
+    pub fn full_health(&self) -> Result<HealthReport> {
+        let mut report = self.system()?;
+        for step in Step::ALL {
+            match self.step(step) {
+                Ok((sensors, drives)) => {
+                    report.add_sensors(sensors);
+                    for drive in drives {
+                        match self.drive(&drive) {
+                            Ok(Some(sensor)) => report.add_sensors(vec![sensor]),
+                            Ok(None) => {}
+                            Err(e) => report.add(step, Err(e)),
+                        }
+                    }
+                }
+                Err(e) => report.add(step, Err(e)),
+            }
+        }
+        Ok(report)
+    }
+
     /// Overall system, processor and memory health (one request).
     pub fn system(&self) -> Result<HealthReport> {
         Ok(system_report(&self.get(SYSTEM)?))
@@ -336,29 +362,49 @@ impl Redfish {
 
     /// The whole SEL, newest first.
     pub fn sel(&self) -> Result<Vec<SelEntry>> {
+        let raw = self.log_members(SEL_ENTRIES, SEL_SERVICE, usize::MAX)?;
+        let mut entries: Vec<SelEntry> = raw.iter().map(sel_entry).collect();
+        entries.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+        // Pages can overlap if entries are logged while paging.
+        entries.dedup_by_key(|e| e.id);
+        Ok(entries)
+    }
+
+    /// Up to `limit` Lifecycle Controller log entries, as the iDRAC returns them.
+    pub fn lc_log(&self, limit: usize) -> Result<Vec<Value>> {
+        self.log_members(LC_ENTRIES, LC_SERVICE, limit)
+    }
+
+    /// Raw members of a log's entry collection, following the iDRAC's paging, up to `limit`.
+    fn log_members(&self, known_entries: &str, service: &str, limit: usize) -> Result<Vec<Value>> {
         // Known iDRAC 8 location first (saves a slow request); otherwise ask the log service.
-        let (base, mut page) = match self.get(SEL_ENTRIES) {
-            Ok(page) => (SEL_ENTRIES.to_string(), page),
+        let (base, mut page) = match self.get(known_entries) {
+            Ok(page) => (known_entries.to_string(), page),
             Err(_) => {
-                let service = self.get(SEL_SERVICE)?;
-                let base = service["Entries"]["@odata.id"]
+                let service_doc = self.get(service)?;
+                let base = service_doc["Entries"]["@odata.id"]
                     .as_str()
-                    .context("the SEL service has no Entries link")?
+                    .with_context(|| format!("{service} has no Entries link"))?
                     .to_string();
                 let page = self.get(&base)?;
                 (base, page)
             }
         };
-        let mut entries: Vec<SelEntry> = Vec::new();
+        let mut entries: Vec<Value> = Vec::new();
         let mut current = base.clone();
         loop {
             let members = page["Members"].as_array().cloned().unwrap_or_default();
-            entries.extend(members.iter().map(sel_entry));
+            let got = members.len();
+            entries.extend(members);
+            if entries.len() >= limit {
+                entries.truncate(limit);
+                break;
+            }
             let total = page["Members@odata.count"].as_u64().unwrap_or(0) as usize;
             // An iDRAC 8 pages by $skip and leaves nextLink empty, so page by count as well.
             let next = match page["Members@odata.nextLink"].as_str().map(str::trim) {
                 Some(link) if !link.is_empty() && link != current => link.to_string(),
-                _ if !members.is_empty() && entries.len() < total => {
+                _ if got > 0 && entries.len() < total => {
                     format!("{base}?$skip={}", entries.len())
                 }
                 _ => break,
@@ -366,10 +412,30 @@ impl Redfish {
             current = next;
             page = self.get(&current)?;
         }
-        entries.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
-        // Pages can overlap if entries are logged while paging.
-        entries.dedup_by_key(|e| e.id);
         Ok(entries)
+    }
+
+    /// Any Redfish resource, for callers that read fields themselves.
+    pub fn json(&self, path: &str) -> Result<Value> {
+        self.get(path)
+    }
+
+    /// The members of a collection, expanded. Asks for `$expand` (one request) and falls
+    /// back to fetching each member where the firmware returns links only.
+    pub fn collection(&self, path: &str) -> Result<Vec<Value>> {
+        let doc = match self.get(&format!("{path}?$expand=*($levels=1)")) {
+            Ok(doc) => doc,
+            Err(_) => self.get(path)?,
+        };
+        let mut out = Vec::new();
+        for member in doc["Members"].as_array().into_iter().flatten() {
+            let is_link = member.as_object().is_some_and(|o| o.len() == 1);
+            match member["@odata.id"].as_str() {
+                Some(link) if is_link => out.push(self.get(link)?),
+                _ => out.push(member.clone()),
+            }
+        }
+        Ok(out)
     }
 
     pub fn clear_sel(&self) -> Result<()> {
@@ -389,7 +455,7 @@ impl Redfish {
     }
 }
 
-fn str_field(v: &Value, key: &str) -> String {
+pub fn str_field(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().trim().to_string()
 }
 

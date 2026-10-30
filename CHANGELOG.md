@@ -14,7 +14,15 @@ iDRAC 9 support (after v0.1.0, the same day).
   - Login uses the iDRAC 9 session API. The noVNC viewer gets its KVM session ids the way Dell's web UI hands them over, so they never appear in the URL.
   - Closing a tab unloads the viewer and deletes the session; reconnecting right away doesn't hit the "share this session" prompt.
 
+- **Screenshot.** A header-bar button saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac` (`defaults.screenshot_dir`). A notice offers to open the folder.
+- **Export Logs.** Saves a zip per server, from the header bar or the address book's right-click menu:
+  - `summary.txt` / `summary.json`: model, service tag, serial, BIOS and iDRAC firmware, health, CPUs, DIMMs, storage, NICs and PSUs;
+  - `health.csv`, `sel.csv`, and `lclog.csv` (the newest 500 Lifecycle Controller entries).
+
+  It has progress and Cancel, and contains no credentials.
+
 ### Fixed
+- **No GPU.** The console now loads on machines without a GPU render node (`/dev/dri`), such as VMs without a virtual GPU and containers. The app switches Mesa to software rendering (`LIBGL_ALWAYS_SOFTWARE=1`) when there is no render node.
 - The viewer's UI language is set to English when the system locale is `C`. The iDRAC 9 viewer used to request a missing `c.json` locale file.
 
 ### Known Issues
@@ -58,6 +66,6 @@ First release (v0.1.0).
   - gitleaks and betterleaks secret scanning.
 
 ### Known Issues
-- The console needs a GPU render node (`/dev/dri`). Desktops and most VMs with a virtual GPU have one; without it, WebKit's web process stalls and the console page never loads. The address book and Health & SEL still work.
+- The console needs a GPU render node (`/dev/dri`). Desktops and most VMs with a virtual GPU have one; without it, WebKit's web process stalls and the console page never loads. The address book and Health & SEL still work. (Fixed in the section above.)
 - The AppImage needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04, Fedora 37 and later).
 - iDRAC 8 Redfish is slow (about 5 s per request plus a TLS handshake), so a full Health & SEL read of an R630 takes about a minute.

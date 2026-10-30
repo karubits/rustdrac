@@ -5,6 +5,7 @@
 //!   user: admin
 //!   theme: dark          # dark (default), light or system
 //!   health_check_minutes: 15   # background alarm check; 0 turns it off
+//!   screenshot_dir: ~/Pictures/Rust Drac
 //! connections:
 //!   - id: 3f9c1a2b7d4e5f60
 //!     name: lab-r630
@@ -51,6 +52,9 @@ pub struct Defaults {
     /// How often servers with a saved password are checked for alarms (default 15, 0 = off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check_minutes: Option<u64>,
+    /// Where console screenshots go (default: ~/Pictures/Rust Drac). `~/` is expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,6 +287,17 @@ impl Store {
             .unwrap_or(DEFAULT_HEALTH_CHECK_MINUTES)
     }
 
+    pub fn screenshot_dir(&self) -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        match self.defaults.screenshot_dir.as_deref() {
+            Some(dir) if dir.starts_with("~/") => home.join(&dir[2..]),
+            Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => dirs::picture_dir()
+                .unwrap_or_else(|| home.join("Pictures"))
+                .join("Rust Drac"),
+        }
+    }
+
     pub fn default_user(&self) -> String {
         self.defaults.user.clone().unwrap_or_else(|| "root".into())
     }
@@ -335,6 +350,7 @@ mod tests {
                 user: Some("admin".into()),
                 theme: None,
                 health_check_minutes: Some(0),
+                screenshot_dir: None,
             },
             connections: vec![sample()],
         };

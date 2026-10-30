@@ -47,6 +47,21 @@ Each console opens in its own tab. To close one, use the tab's ✕ or the viewer
 
 ![Virtual console in a tab](docs/screenshots/console.png)
 
+## Screenshots and log export
+
+The header bar has two actions for the server in the current tab:
+- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. Set `defaults.screenshot_dir` to change the folder. A notice offers **Open Folder**.
+- **Export Logs** (console and Health tabs, and the address book's right-click menu) saves a zip for a support case or an audit:
+
+  | File | Contents |
+  |---|---|
+  | `summary.txt` / `summary.json` | Model, service tag, serial, BIOS and iDRAC firmware, power state, health and alarms, CPUs, DIMMs (slot, size, speed, part number), storage controllers and drives (model, size, serial), NICs (MAC, link, speed) and PSUs |
+  | `health.csv` | Every component and sensor with its status and reading |
+  | `sel.csv` | The full System Event Log |
+  | `lclog.csv` | The newest 500 Lifecycle Controller log entries |
+
+  It is read over Redfish, with progress and Cancel, and contains no credentials. Expect a few seconds on iDRAC 9 and two to three minutes on iDRAC 8.
+
 ## Health, SEL and alarms
 
 ![Health & SEL](docs/screenshots/health.png)
@@ -75,6 +90,7 @@ iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake (i
 defaults:
   user: admin        # used when a connection has no user
   theme: dark            # dark (default), light or system
+  screenshot_dir: ~/Pictures/Rust Drac
   health_check_minutes: 15  # background alarm check; 0 = off
 connections:
   - id: 3f9c1a2b7d4e5f60 # generated; links the entry to its saved password
@@ -187,6 +203,13 @@ Versions follow [SemVer](https://semver.org/): patch for fixes, minor for new fe
 | `RUSTDRAC_AUTOCLOSE=<secs>` | Closes the window after N seconds, disconnecting every console |
 | `RUSTDRAC_SNAPSHOT=<file.png>` | With AUTOCLOSE, saves a PNG of the current tab before closing |
 | `RUSTDRAC_SNAPSHOT_PAGE=<n>` | With SNAPSHOT, switches to tab n first (0 = Connections) |
+| `RUSTDRAC_TEST_SCREENSHOT=<secs>` | Presses the Screenshot button after N seconds |
+
+To test the log export against a real iDRAC (it writes `rustdrac-export-test.zip` to the temp folder):
+
+```sh
+RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored export_from_a_real_idrac --nocapture
+```
 
 ## License
 

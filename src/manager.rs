@@ -70,6 +70,8 @@ pub struct Hooks {
     pub health: Box<dyn Fn(&Connection)>,
     /// Run the alarm check on every server with a saved password.
     pub check_all: Box<dyn Fn()>,
+    /// Export logs and a hardware summary for this saved connection.
+    pub export: Box<dyn Fn(&Connection)>,
 }
 
 struct Inner {
@@ -509,6 +511,12 @@ impl Manager {
         }
     }
 
+    fn export_selected(&self) {
+        if let Some(c) = self.selected() {
+            (self.0.hooks.export)(&c);
+        }
+    }
+
     fn health_selected(&self) {
         if let Some(c) = self.selected() {
             (self.0.hooks.health)(&c);
@@ -656,6 +664,7 @@ impl Manager {
         };
         item("Connect", has, Box::new(|m| m.connect_selected()));
         item("Health & SEL", has, Box::new(|m| m.health_selected()));
+        item("Export Logs…", has, Box::new(|m| m.export_selected()));
         item("Edit…", has, Box::new(|m| m.edit_selected()));
         item("Duplicate…", has, Box::new(|m| m.duplicate_selected()));
         item("Delete…", has, Box::new(|m| m.delete_selected()));

@@ -242,6 +242,10 @@ impl HealthTab {
         format!("{} · Health & SEL", self.0.target.name)
     }
 
+    pub fn target(&self) -> &Target {
+        &self.0.target
+    }
+
     pub fn connection_id(&self) -> Option<&str> {
         self.0.target.connection_id.as_deref()
     }

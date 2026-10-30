@@ -1,4 +1,5 @@
 mod console;
+mod export;
 mod health;
 mod idrac;
 mod manager;
@@ -8,7 +9,10 @@ mod theme;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use clap::Parser;
@@ -50,6 +54,7 @@ struct Cli {
 }
 
 fn main() {
+    use_software_gl_without_gpu();
     let cli = Cli::parse();
     // Matches the .desktop file's StartupWMClass so docks group the window with its launcher.
     glib::set_prgname(Some("rustdrac"));
@@ -94,6 +99,10 @@ fn run(cli: Cli) -> Result<()> {
 struct AppInner {
     window: gtk::Window,
     header: gtk::HeaderBar,
+    /// Header-bar actions on the current tab's server (shown for console / health tabs).
+    screenshot_button: gtk::Button,
+    export_button: gtk::Button,
+    toast: Toast,
     notebook: gtk::Notebook,
     manager: RefCell<Option<Manager>>,
     store: Rc<RefCell<Store>>,
@@ -121,15 +130,34 @@ impl App {
             .show_close_button(true)
             .build();
         window.set_titlebar(Some(&header));
+        let screenshot_button = header_button(
+            "Screenshot",
+            "camera-photo-symbolic",
+            "Save the console picture as a PNG",
+        );
+        let export_button = header_button(
+            "Export Logs",
+            "document-save-symbolic",
+            "Save a zip with a hardware summary, health, the SEL and the Lifecycle log",
+        );
+        header.pack_end(&export_button);
+        header.pack_end(&screenshot_button);
         let notebook = gtk::Notebook::builder()
             .scrollable(true)
             .show_border(false)
             .build();
-        window.add(&notebook);
+        let toast = Toast::new();
+        let overlay = gtk::Overlay::new();
+        overlay.add(&notebook);
+        overlay.add_overlay(&toast.revealer);
+        window.add(&overlay);
 
         let app = App(Rc::new(AppInner {
             window,
             header,
+            screenshot_button,
+            export_button,
+            toast,
             notebook,
             manager: RefCell::new(None),
             store: Rc::new(RefCell::new(store)),
@@ -144,7 +172,7 @@ impl App {
 
         let weak = app.downgrade();
         let weak2 = app.downgrade();
-        let (weak3, weak4) = (app.downgrade(), app.downgrade());
+        let (weak3, weak4, weak5) = (app.downgrade(), app.downgrade(), app.downgrade());
         let manager = Manager::new(
             app.0.store.clone(),
             manager::Hooks {
@@ -166,6 +194,11 @@ impl App {
                 check_all: Box::new(move || {
                     if let Some(app) = upgrade(&weak4) {
                         app.check_all();
+                    }
+                }),
+                export: Box::new(move |c| {
+                    if let Some(app) = upgrade(&weak5) {
+                        app.export_saved(c.clone());
                     }
                 }),
             },
@@ -190,6 +223,10 @@ impl App {
                 .map(|t| t.title())
                 .or_else(|| health.as_ref().map(|h| h.title()));
             app.set_subtitle(title.as_deref());
+            app.0.screenshot_button.set_visible(tab.is_some());
+            app.0
+                .export_button
+                .set_visible(tab.is_some() || health.is_some());
             // Focus after the switch has finished.
             let weak = app.downgrade();
             glib::idle_add_local_once(move || {
@@ -221,9 +258,198 @@ impl App {
             glib::Propagation::Stop
         });
 
+        let weak = app.downgrade();
+        app.0.screenshot_button.connect_clicked(move |_| {
+            if let Some(app) = upgrade(&weak) {
+                app.take_screenshot();
+            }
+        });
+        let weak = app.downgrade();
+        app.0.export_button.connect_clicked(move |_| {
+            if let Some(app) = upgrade(&weak) {
+                app.export_current();
+            }
+        });
+
         app.0.window.show_all();
+        app.0.toast.revealer.set_reveal_child(false);
+        app.0.screenshot_button.hide();
+        app.0.export_button.hide();
         app.manager().focus_search();
         app
+    }
+
+    fn current_page(&self) -> Option<gtk::Widget> {
+        self.0.notebook.nth_page(self.0.notebook.current_page())
+    }
+
+    /// Save the current console as `<screenshot dir>/<name>-<tag>-<time>.png`.
+    fn take_screenshot(&self) {
+        let Some(tab) = self.current_page().and_then(|p| self.tab_for(&p)) else {
+            return;
+        };
+        let dir = self.0.store.borrow().screenshot_dir();
+        let base = export::base_name(&tab.target().name, &tab.service_tag(), &now_stamp());
+        let weak = self.downgrade();
+        tab.screenshot(move |res| {
+            let Some(app) = upgrade(&weak) else { return };
+            let saved = res.and_then(|png| {
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("{base}.png"));
+                std::fs::write(&path, png)?;
+                Ok(path)
+            });
+            match saved {
+                Ok(path) => app.0.toast.show(
+                    &format!("Screenshot saved: {}", store::display_path(&path)),
+                    Some(dir),
+                ),
+                Err(e) => app.0.toast.show(&format!("Screenshot failed: {e:#}"), None),
+            }
+        });
+    }
+
+    /// Export logs for the server of the current console or health tab.
+    fn export_current(&self) {
+        let Some(page) = self.current_page() else {
+            return;
+        };
+        if let Some(tab) = self.tab_for(&page) {
+            let t = tab.target();
+            let server = export_server(&t.name, &t.host, &t.user, &t.password, &tab.service_tag());
+            self.export_logs(server);
+        } else if let Some(tab) = self.health_for(&page) {
+            let t = tab.target();
+            let tag = t
+                .connection_id
+                .as_ref()
+                .and_then(|id| self.0.store.borrow().get(id).map(|c| c.service_tag.clone()))
+                .unwrap_or_default();
+            self.export_logs(export_server(&t.name, &t.host, &t.user, &t.password, &tag));
+        }
+    }
+
+    fn export_saved(&self, conn: Connection) {
+        let Some((user, password)) = self.credentials(conn.clone(), None, None) else {
+            return;
+        };
+        self.export_logs(export_server(
+            conn.display_name(),
+            &conn.address,
+            &user,
+            &password,
+            &conn.service_tag,
+        ));
+    }
+
+    /// Ask where to save, then read everything in the background behind a progress dialog.
+    fn export_logs(&self, server: ExportServer) {
+        let stamp = now_stamp();
+        let base = export::base_name(&server.name, &server.service_tag, &stamp);
+        let chooser = gtk::FileChooserNative::new(
+            Some("Export Logs"),
+            Some(&self.0.window),
+            gtk::FileChooserAction::Save,
+            Some("Export"),
+            Some("Cancel"),
+        );
+        chooser.set_do_overwrite_confirmation(true);
+        chooser.set_current_name(&format!("{base}.zip"));
+        if let Some(dir) = dirs::download_dir() {
+            chooser.set_current_folder(dir);
+        }
+        if chooser.run() != gtk::ResponseType::Accept {
+            return;
+        }
+        let Some(path) = chooser.filename() else {
+            return;
+        };
+        let folder = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or(base);
+
+        let dialog = gtk::Dialog::with_buttons(
+            Some("Export Logs"),
+            Some(&self.0.window),
+            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+            &[("Cancel", gtk::ResponseType::Cancel)],
+        );
+        dialog.set_default_size(420, -1);
+        let label = gtk::Label::new(Some(&format!("Reading {} from {}…", "system", server.name)));
+        label.set_xalign(0.0);
+        let bar = gtk::ProgressBar::new();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        content.set_border_width(16);
+        content.add(&label);
+        content.add(&bar);
+        dialog.content_area().add(&content);
+        dialog.show_all();
+
+        let progress = Arc::new(Mutex::new(String::from("system")));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        let l = label.clone();
+        dialog.connect_response(move |_, _| {
+            c.store(true, Ordering::Relaxed);
+            l.set_text("Cancelling after the current request…");
+        });
+        let (p, l, b, name) = (
+            progress.clone(),
+            label.clone(),
+            bar.clone(),
+            server.name.clone(),
+        );
+        let ticker = glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            b.pulse();
+            let step = p.lock().map(|s| s.clone()).unwrap_or_default();
+            if !step.is_empty() {
+                l.set_text(&format!("Reading {step} from {name}…"));
+            }
+            glib::ControlFlow::Continue
+        });
+
+        let client = self.0.client.clone();
+        let out = path.clone();
+        let job = gtk::gio::spawn_blocking(move || -> Result<()> {
+            let rf = Redfish::new(&client, &server.host, &server.user, &server.password);
+            let collected = export::collect(
+                &rf,
+                &|step| {
+                    if let Ok(mut p) = progress.lock() {
+                        *p = step.to_string();
+                    }
+                },
+                &|| cancel.load(Ordering::Relaxed),
+            )?;
+            if let Ok(mut p) = progress.lock() {
+                p.clear();
+            }
+            let summary = export::summary_json(&collected, &server.name, &server.host, &now_iso());
+            let zip = export::build_zip(&collected, &folder, &summary)?;
+            std::fs::write(&out, zip)?;
+            Ok(())
+        });
+        let weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let result = job
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("export task panicked")));
+            ticker.remove();
+            // SAFETY: the dialog is not used after this point.
+            unsafe { dialog.destroy() };
+            let Some(app) = upgrade(&weak) else { return };
+            match result {
+                Ok(()) => app.0.toast.show(
+                    &format!("Logs exported: {}", store::display_path(&path)),
+                    path.parent().map(PathBuf::from),
+                ),
+                Err(e) if e.to_string() == "cancelled" => {
+                    app.0.toast.show("Export cancelled", None)
+                }
+                Err(e) => error_dialog(Some(&app.0.window), &format!("Export failed: {e:#}")),
+            }
+        });
     }
 
     /// Show what the current tab is connected to in the header bar and window title.
@@ -620,6 +846,18 @@ impl App {
             return;
         };
         let snapshot = std::env::var_os("RUSTDRAC_SNAPSHOT");
+        // RUSTDRAC_TEST_SCREENSHOT=<secs> presses the screenshot button after N seconds.
+        if let Some(at) = std::env::var("RUSTDRAC_TEST_SCREENSHOT")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            let weak = self.downgrade();
+            glib::timeout_add_seconds_local_once(at, move || {
+                if let Some(app) = upgrade(&weak) {
+                    app.take_screenshot();
+                }
+            });
+        }
         // RUSTDRAC_SNAPSHOT_PAGE=<n> switches to tab n a second before the snapshot.
         if let Some(n) = std::env::var("RUSTDRAC_SNAPSHOT_PAGE")
             .ok()
@@ -664,6 +902,22 @@ impl App {
     }
 }
 
+/// Without a GPU render node (VMs without a virtual GPU, containers) WebKit's web process
+/// stalls initialising GL and the console page never loads. Mesa's software renderer
+/// (llvmpipe) avoids that. A value the user set is kept.
+fn use_software_gl_without_gpu() {
+    let has_render_node = std::fs::read_dir("/dev/dri")
+        .map(|dir| {
+            dir.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        })
+        .unwrap_or(false);
+    if !has_render_node && std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none() {
+        // SAFETY: called first thing in main, before any other thread exists.
+        unsafe { std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1") };
+    }
+}
+
 /// The app icon, built in so windows and dialogs have it even when not installed.
 fn set_default_icon() {
     const ICON: &[u8] = include_bytes!("../packaging/icons/rustdrac-256.png");
@@ -672,6 +926,121 @@ fn set_default_icon() {
         Ok(icon) => gtk::Window::set_default_icon(&icon),
         Err(e) => eprintln!("rustdrac: app icon: {e}"),
     }
+}
+
+/// Server details for [`App::export_logs`].
+struct ExportServer {
+    name: String,
+    host: String,
+    user: String,
+    password: String,
+    service_tag: String,
+}
+
+fn export_server(name: &str, host: &str, user: &str, password: &str, tag: &str) -> ExportServer {
+    ExportServer {
+        name: name.to_string(),
+        host: host.to_string(),
+        user: user.to_string(),
+        password: password.to_string(),
+        service_tag: tag.to_string(),
+    }
+}
+
+fn header_button(label: &str, icon: &str, tip: &str) -> gtk::Button {
+    let b = gtk::Button::with_label(label);
+    b.set_image(Some(&gtk::Image::from_icon_name(
+        Some(icon),
+        gtk::IconSize::Button,
+    )));
+    b.set_always_show_image(true);
+    b.set_tooltip_text(Some(tip));
+    b.set_no_show_all(true);
+    b
+}
+
+/// A short message at the bottom of the window, with "Open Folder" when it names a file.
+struct Toast {
+    revealer: gtk::Revealer,
+    label: gtk::Label,
+    open: gtk::Button,
+    folder: Rc<RefCell<Option<PathBuf>>>,
+    hide: Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+impl Toast {
+    fn new() -> Toast {
+        let label = gtk::Label::new(None);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        label.set_max_width_chars(70);
+        let open = gtk::Button::with_label("Open Folder");
+        let close = gtk::Button::from_icon_name(Some("window-close-symbolic"), gtk::IconSize::Menu);
+        close.set_relief(gtk::ReliefStyle::None);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        row.style_context().add_class("app-toast");
+        row.add(&label);
+        row.add(&open);
+        row.add(&close);
+        let revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::End)
+            .margin_bottom(18)
+            .child(&row)
+            .build();
+        let folder: Rc<RefCell<Option<PathBuf>>> = Rc::default();
+        let f = folder.clone();
+        open.connect_clicked(move |_| {
+            if let Some(dir) = f.borrow().as_ref() {
+                let uri = gtk::gio::File::for_path(dir).uri();
+                if let Err(e) = gtk::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    None::<&gtk::gio::AppLaunchContext>,
+                ) {
+                    eprintln!("rustdrac: opening {}: {e}", dir.display());
+                }
+            }
+        });
+        let r = revealer.clone();
+        close.connect_clicked(move |_| r.set_reveal_child(false));
+        Toast {
+            revealer,
+            label,
+            open,
+            folder,
+            hide: Rc::default(),
+        }
+    }
+
+    fn show(&self, message: &str, folder: Option<PathBuf>) {
+        self.label.set_text(message);
+        self.open.set_visible(folder.is_some());
+        *self.folder.borrow_mut() = folder;
+        self.revealer.set_reveal_child(true);
+        if let Some(id) = self.hide.borrow_mut().take() {
+            id.remove();
+        }
+        let (r, hide) = (self.revealer.clone(), self.hide.clone());
+        *self.hide.borrow_mut() = Some(glib::timeout_add_seconds_local_once(8, move || {
+            hide.borrow_mut().take();
+            r.set_reveal_child(false);
+        }));
+    }
+}
+
+/// `YYYYMMDD-HHMMSS` for file names.
+fn now_stamp() -> String {
+    glib::DateTime::now_local()
+        .and_then(|d| d.format("%Y%m%d-%H%M%S"))
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+fn now_iso() -> String {
+    glib::DateTime::now_local()
+        .and_then(|d| d.format_iso8601())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 fn now_hms() -> String {

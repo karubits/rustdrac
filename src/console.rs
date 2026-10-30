@@ -74,10 +74,49 @@ struct Inner {
     tab_spinner: gtk::Spinner,
     tab: gtk::Box,
     webview: RefCell<Option<WebView>>,
+    service_tag: RefCell<String>,
 }
 
 #[derive(Clone)]
 pub struct ConsoleTab(Rc<Inner>);
+
+/// Debugging aid: every canvas with its size, on-screen box and a few sampled pixels.
+const CANVAS_INVENTORY_JS: &str = r##"(function () {
+    var out = { frames: document.querySelectorAll("iframe").length, shadows: 0, canvases: [], big: [] };
+    function walk(root, path) {
+        root.querySelectorAll("*").forEach(function (el) {
+            if (el.shadowRoot) { out.shadows++; walk(el.shadowRoot, path + ">" + el.tagName); }
+            var r = el.getBoundingClientRect();
+            if (el.tagName === "CANVAS") {
+                var px = null;
+                try { var ctx = el.getContext("2d"); if (ctx) px = Array.from(ctx.getImageData(el.width / 2, el.height / 2, 1, 1).data); }
+                catch (e) { px = String(e); }
+                out.canvases.push({ path: path, w: el.width, h: el.height, box: [Math.round(r.width), Math.round(r.height)], px: px });
+            }
+            if (r.width * r.height > 300000 && el.children.length < 3)
+                out.big.push(el.tagName + (el.id ? "#" + el.id : "") + "." + String(el.className).slice(0, 40) + " " + Math.round(r.width) + "x" + Math.round(r.height));
+        });
+    }
+    walk(document, "doc");
+    document.querySelectorAll("iframe").forEach(function (f, i) {
+        try { walk(f.contentDocument, "iframe" + i); } catch (e) { out.canvases.push("iframe" + i + ": " + e); }
+    });
+    return JSON.stringify(out);
+})()"##;
+
+/// The KVM picture as a PNG data URL: the viewer draws it into its largest visible
+/// `<canvas>` (both the iDRAC 8 viewer and iDRAC 9's noVNC). Empty if there is none yet.
+const CANVAS_PNG_JS: &str = r#"(function () {
+    var best = null, area = 0;
+    document.querySelectorAll("canvas").forEach(function (c) {
+        var r = c.getBoundingClientRect();
+        // Only a canvas that is actually on screen: before the KVM connects, the viewer has
+        // a hidden, empty one.
+        var a = c.width * c.height;
+        if (r.width > 0 && r.height > 0 && a > area) { area = a; best = c; }
+    });
+    return best ? best.toDataURL("image/png") : "";
+})()"#;
 
 struct Connected {
     session: idrac::Session,
@@ -154,6 +193,7 @@ impl ConsoleTab {
             tab_spinner,
             tab,
             webview: RefCell::new(None),
+            service_tag: RefCell::new(String::new()),
         }));
 
         let weak = this.downgrade();
@@ -190,6 +230,56 @@ impl ConsoleTab {
 
     pub fn webview(&self) -> Option<WebView> {
         self.0.webview.borrow().clone()
+    }
+
+    pub fn target(&self) -> &Target {
+        &self.0.target
+    }
+
+    /// Learned from Redfish on connect; empty until then.
+    pub fn service_tag(&self) -> String {
+        self.0.service_tag.borrow().clone()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        matches!(*self.0.state.borrow(), State::Connected { .. })
+    }
+
+    /// A PNG of the console: the KVM canvas without Dell's toolbar, or (if the page has no
+    /// readable canvas) a snapshot of the whole view.
+    pub fn screenshot(&self, done: impl FnOnce(Result<Vec<u8>>) + 'static) {
+        let Some(view) = self.webview().filter(|_| self.is_connected()) else {
+            return done(Err(anyhow::anyhow!("the console is not connected")));
+        };
+        if std::env::var_os("RUSTDRAC_DEBUG").is_some() {
+            view.evaluate_javascript(
+                CANVAS_INVENTORY_JS,
+                None,
+                None,
+                None::<&gtk::gio::Cancellable>,
+                |res| {
+                    if let Ok(v) = res {
+                        eprintln!("[canvases] {}", javascriptcore::ValueExt::to_str(&v));
+                    }
+                },
+            );
+        }
+        let fallback = view.clone();
+        view.evaluate_javascript(
+            CANVAS_PNG_JS,
+            None,
+            None,
+            None::<&gtk::gio::Cancellable>,
+            move |res| {
+                let data_url = res
+                    .ok()
+                    .map(|v| javascriptcore::ValueExt::to_str(&v).to_string());
+                match data_url.as_deref().and_then(decode_png_data_url) {
+                    Some(png) => done(Ok(png)),
+                    None => snapshot_png(&fallback, done),
+                }
+            },
+        );
     }
 
     pub fn is_closed(&self) -> bool {
@@ -258,6 +348,7 @@ impl ConsoleTab {
             }
             Ok(c) => {
                 if let Some(identity) = &c.identity {
+                    *self.0.service_tag.borrow_mut() = identity.service_tag.clone();
                     (self.0.hooks.on_identity)(&self.0.target, identity);
                 }
                 let title = c
@@ -450,6 +541,30 @@ impl ConsoleTab {
         }
         webview
     }
+}
+
+fn decode_png_data_url(url: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let b64 = url.strip_prefix("data:image/png;base64,")?;
+    base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
+fn snapshot_png(view: &WebView, done: impl FnOnce(Result<Vec<u8>>) + 'static) {
+    view.snapshot(
+        webkit2gtk::SnapshotRegion::Visible,
+        webkit2gtk::SnapshotOptions::NONE,
+        None::<&gtk::gio::Cancellable>,
+        move |res| {
+            done((|| {
+                let surface = res?;
+                let image = gtk::cairo::ImageSurface::try_from(surface)
+                    .map_err(|_| anyhow::anyhow!("snapshot is not an image"))?;
+                let mut png = Vec::new();
+                image.write_to_png(&mut png)?;
+                Ok(png)
+            })())
+        },
+    );
 }
 
 fn upgrade(weak: &Weak<Inner>) -> Option<ConsoleTab> {

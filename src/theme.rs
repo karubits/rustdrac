@@ -107,6 +107,16 @@ button.destructive-action:hover { background-color: @brand_red; }
 .health-overall { margin-bottom: 2px; }
 paned > separator { min-height: 8px; background: none; }
 
+.app-toast {
+    padding: 8px 10px 8px 16px;
+    border-radius: 10px;
+    background-color: #2b3035;
+    color: #eceeef;
+    border: 1px solid alpha(@accent, 0.6);
+    box-shadow: 0 4px 16px alpha(black, 0.45);
+}
+.app-toast button { color: #eceeef; }
+
 .manager-footer { font-size: 0.9em; opacity: 0.6; }
 .empty-title { font-size: 1.6em; font-weight: 300; }
 .empty-hint { opacity: 0.6; }
