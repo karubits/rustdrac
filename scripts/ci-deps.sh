@@ -7,10 +7,10 @@ sudo=""
 [ "$(id -u)" -eq 0 ] || sudo=sudo
 export DEBIAN_FRONTEND=noninteractive
 $sudo apt-get update -qq
-$sudo apt-get install -y -qq --no-install-recommends \
+$sudo apt-get install -y -q --no-install-recommends \
   build-essential pkg-config file patchelf curl ca-certificates git \
   libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libdbus-1-dev \
-  glib-networking librsvg2-common shared-mime-info >/dev/null
+  glib-networking librsvg2-common shared-mime-info
 
 if ! command -v cargo >/dev/null 2>&1; then
   curl -fsSL --retry 3 https://sh.rustup.rs | sh -s -- -y --profile minimal --component rustfmt,clippy
