@@ -1,0 +1,14 @@
+# Shared by gitleaks and betterleaks (drop-in compatible config).
+title = "rustdrac"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build output and downloaded tools, never committed"
+paths = [
+  '''^target/''',
+  '''^build/''',
+  '''^dist/''',
+  '''^bin/''',
+]

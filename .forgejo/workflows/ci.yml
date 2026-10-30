@@ -1,0 +1,73 @@
+---
+# CI: Rust checks, dependency policy and secret scanning on every push and PR.
+# Releases (release.yml) run on version tags; tag pushes are skipped here.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+  schedule:
+    - cron: "0 1 * * 1" # Monday 01:00 UTC: catch newly published advisories
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Node-based actions ignore the system CA store; point them at it.
+  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, cargo-deny)
+    runs-on: k8s-dmz
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build dependencies and toolchain
+        run: scripts/ci-deps.sh
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (warnings are errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: tests
+        run: cargo test --locked
+      - name: cargo-deny (advisories, licences, bans, sources)
+        run: |
+          scripts/install-tools.sh cargo-deny
+          bin/cargo-deny check
+
+  secrets:
+    name: Secret scanning (gitleaks, betterleaks)
+    runs-on: k8s-dmz
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: a leak in an old commit still counts
+          persist-credentials: false
+      - run: scripts/install-tools.sh gitleaks betterleaks
+      - name: gitleaks (history + working tree)
+        run: |
+          bin/gitleaks git --redact --no-banner --config .gitleaks.toml .
+          bin/gitleaks dir --redact --no-banner --config .gitleaks.toml .
+      - name: betterleaks (history + working tree)
+        run: |
+          bin/betterleaks git --redact --no-banner --config .gitleaks.toml .
+          bin/betterleaks dir --redact --no-banner --config .gitleaks.toml .
+
+  scripts:
+    name: Shell scripts (shellcheck)
+    runs-on: k8s-dmz
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          apt-get update -qq && apt-get install -y -qq shellcheck >/dev/null
+          shellcheck -S warning scripts/*.sh

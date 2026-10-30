@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rust Drac
+GenericName=iDRAC Console
+Comment=Dell iDRAC 8 virtual console, address book, health and SEL viewer
+Exec=rustdrac %U
+Icon=rustdrac
+Terminal=false
+Categories=Network;System;RemoteAccess;
+Keywords=idrac;dell;kvm;console;ipmi;sel;server;
+StartupWMClass=rustdrac

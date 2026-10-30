@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rust Drac app icon: a console screen with a health pulse above two server units. MIT, see LICENSE. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3035"/>
+      <stop offset="1" stop-color="#15181b"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c0e10"/>
+      <stop offset="1" stop-color="#1a1d21"/>
+    </linearGradient>
+    <linearGradient id="unit" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a5258"/>
+      <stop offset="1" stop-color="#363c41"/>
+    </linearGradient>
+  </defs>
+
+  <!-- tile -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="51.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+
+  <!-- console screen -->
+  <rect x="40" y="40" width="176" height="104" rx="14" fill="url(#screen)" stroke="#e76125" stroke-width="5"/>
+  <!-- health pulse -->
+  <polyline points="56,100 88,100 100,74 116,124 130,86 140,100 168,100"
+            fill="none" stroke="#e76125" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- prompt cursor -->
+  <rect x="178" y="94" width="22" height="9" rx="3" fill="#ececec"/>
+
+  <!-- server units -->
+  <rect x="40" y="160" width="176" height="26" rx="7" fill="url(#unit)"/>
+  <rect x="40" y="194" width="176" height="26" rx="7" fill="url(#unit)"/>
+  <!-- drive bays -->
+  <g fill="#23282c">
+    <rect x="54" y="167" width="62" height="12" rx="3"/>
+    <rect x="54" y="201" width="62" height="12" rx="3"/>
+  </g>
+  <!-- status LEDs -->
+  <circle cx="186" cy="173" r="6" fill="#3fb950"/>
+  <circle cx="202" cy="173" r="6" fill="#e76125"/>
+  <circle cx="186" cy="207" r="6" fill="#3fb950"/>
+  <circle cx="202" cy="207" r="6" fill="#3fb950"/>
+</svg>

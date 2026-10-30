@@ -1,0 +1,32 @@
+[package]
+name = "rustdrac"
+version = "0.1.0"
+edition = "2024"
+description = "Rust Drac: Dell iDRAC 8 console launcher, address book, health and SEL viewer"
+license = "MIT"
+authors = ["Karubits <karubits@proton.me>"]
+rust-version = "1.88"
+readme = "README.md"
+keywords = ["idrac", "dell", "kvm", "redfish", "gtk"]
+categories = ["gui", "network-programming"]
+publish = false
+
+[dependencies]
+anyhow = "1"
+cairo-rs = { version = "0.18", features = ["png"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+gtk = "0.18"
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json", "cookies", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+soup3 = "0.5"
+url = "2"
+webkit2gtk = { version = "2", features = ["v2_40"] }
+
+[profile.release]
+strip = true
+lto = "thin"
