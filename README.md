@@ -1,6 +1,6 @@
 # Rust Drac
 
-A native app for Dell **iDRAC 8** servers:
+A native app for Dell **iDRAC 8 and iDRAC 9** servers (PowerEdge 13th–15th generation and later):
 - the HTML5 virtual console in tabs, with no browser, no login page and no certificate warning;
 - an address book;
 - a health and System Event Log (SEL) viewer;
@@ -65,7 +65,7 @@ All of this uses Redfish with basic auth, so it doesn't take one of the iDRAC's 
   - A desktop notification is shown when a server becomes Warning or Critical.
   - Group rows show the worst state of their servers.
 
-iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake. Rust Drac keeps one connection per iDRAC, sends its requests one at a time (concurrent requests get garbage back), retries transient failures, and fills the Health tab in as results arrive. A full read of an R630 takes about a minute.
+iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake (iDRAC 9 answers in well under a second). Rust Drac keeps one connection per iDRAC, sends its requests one at a time (concurrent requests get garbage back), retries transient failures, and fills the Health tab in as results arrive. A full read of an R630 takes about a minute.
 
 ### Config file
 
@@ -99,6 +99,10 @@ Dark mode is the default: Adwaita dark plus the app's own stylesheet with an ora
 
 ## How it works
 
+The app first checks which web UI the iDRAC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9), so you never pick the generation yourself.
+
+### iDRAC 8
+
 1. **Login.** `POST /data/login` returns the ST1/ST2 tokens and the session cookie. The app then reads the per-login `aimSession` id and the virtual-media privilege, and downloads the viewer's string table (`locale/locale_en.json`).
 2. **Viewer.** `virtualconsolehtml5.html` opens in an embedded WebKitGTK view. Certificate errors are ignored, and each tab is ephemeral and isolated, so nothing is written to disk.
 3. **Shim.** Dell's viewer expects the iDRAC web UI to have opened it, so a small injected script provides two stand-ins:
@@ -106,7 +110,14 @@ Dark mode is the default: Adwaita dark plus the app's own stylesheet with an ora
    - the certificate popup for the KVM port `:5900`, which the viewer waits on before it connects.
 4. **Closing.** Closing a tab disconnects and logs out as described above.
 
-Note: the iDRAC only serves gzip-compressed static files, so a client that doesn't send `Accept-Encoding: gzip` gets a 404.
+Note: the iDRAC 8 only serves gzip-compressed static files, so a client that doesn't send `Accept-Encoding: gzip` gets a 404.
+
+### iDRAC 9
+
+1. **Login.** `POST /sysmgmt/2015/bmc/session`, with the user and password as quoted header values, returns the session cookie and an `XSRF-TOKEN`.
+2. **Console session.** `GET /sysmgmt/2015/server/vconsole` returns the viewer URL (`/restgui/vconsole/index.html`) with the KVM session ids `VCSID`/`VCSID2` in its query.
+3. **Viewer.** Dell's web UI opens the bare viewer page and passes the ids through `sessionStorage`. An injected script does the same, so the ids never appear in the URL. The viewer is noVNC over a `wss://` WebSocket on port 443.
+4. **Closing.** The page is unloaded, which closes the KVM socket, and the session is deleted (`DELETE /sysmgmt/2015/bmc/session`).
 
 ## Build from source
 

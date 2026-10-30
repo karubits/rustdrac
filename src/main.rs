@@ -26,7 +26,7 @@ use store::{Connection, Store};
 
 const APP_TITLE: &str = "Rust Drac";
 
-/// Dell iDRAC 8 HTML5 virtual console, without a browser.
+/// Dell iDRAC 8/9 HTML5 virtual console, without a browser.
 ///
 /// With no arguments the connection manager opens. Each HOST opens a console tab; a HOST can
 /// be an address, or the name, address or service tag of a saved connection.

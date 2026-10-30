@@ -1,4 +1,9 @@
-//! iDRAC 8 web API: login, logout and the HTML5 console URL.
+//! iDRAC web API: login, logout and the HTML5 console page, for iDRAC 8 and iDRAC 9.
+//!
+//! The two generations have different web UIs: iDRAC 8 logs in with `POST /data/login`
+//! (ST1/ST2 tokens) and runs the viewer as a popup of its main window; iDRAC 9 logs in with
+//! `POST /sysmgmt/2015/bmc/session` (an XSRF token) and hands the viewer its KVM session ids
+//! through `sessionStorage`.
 
 use std::time::Duration;
 
@@ -9,17 +14,45 @@ use url::Url;
 
 pub const SESSION_COOKIE: &str = "-http-session-";
 
+const IDRAC9_SESSION: &str = "/sysmgmt/2015/bmc/session";
+const IDRAC9_VCONSOLE: &str = "/sysmgmt/2015/server/vconsole";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Generation {
+    Idrac8,
+    Idrac9,
+}
+
 /// An authenticated iDRAC web session.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host: String,
     pub user: String,
     pub cookie: String,
-    pub st1: String,
-    pub st2: String,
-    /// Per-login AIM session id, used by the viewer to request KVM credentials.
-    pub aim_session: String,
-    pub vm_priv: bool,
+    pub auth: Auth,
+}
+
+#[derive(Debug, Clone)]
+pub enum Auth {
+    Idrac8 {
+        st1: String,
+        st2: String,
+        /// Per-login AIM session id, used by the viewer to request KVM credentials.
+        aim_session: String,
+        vm_priv: bool,
+    },
+    Idrac9 {
+        xsrf: String,
+    },
+}
+
+/// What a console tab loads: the viewer page, a script injected before the page's own
+/// scripts run, and (iDRAC 8) the script the viewer's "Disconnect Viewer" button runs.
+#[derive(Debug, Clone)]
+pub struct ConsolePage {
+    pub url: String,
+    pub script: String,
+    pub disconnect_js: Option<&'static str>,
 }
 
 /// Fields of the XML document returned by `POST /data/login`.
@@ -41,7 +74,31 @@ pub fn http_client() -> Result<Client> {
         .context("building HTTP client")
 }
 
+/// Which web UI the iDRAC runs, from where `/` redirects to (no credentials needed).
+pub fn detect(client: &Client, host: &str) -> Result<Generation> {
+    let resp = client
+        .get(format!("https://{host}/"))
+        .send()
+        .with_context(|| format!("connecting to https://{host}"))?;
+    Ok(generation_from_path(resp.url().path()))
+}
+
+fn generation_from_path(path: &str) -> Generation {
+    if path.starts_with("/restgui/") {
+        Generation::Idrac9
+    } else {
+        Generation::Idrac8
+    }
+}
+
 pub fn login(client: &Client, host: &str, user: &str, password: &str) -> Result<Session> {
+    match detect(client, host)? {
+        Generation::Idrac8 => login8(client, host, user, password),
+        Generation::Idrac9 => login9(client, host, user, password),
+    }
+}
+
+fn login8(client: &Client, host: &str, user: &str, password: &str) -> Result<Session> {
     let resp = client
         .post(format!("https://{host}/data/login"))
         .form(&[("user", user), ("password", password)])
@@ -77,10 +134,12 @@ pub fn login(client: &Client, host: &str, user: &str, password: &str) -> Result<
         host: host.to_string(),
         user: user.to_string(),
         cookie,
-        st1,
-        st2,
-        aim_session: String::new(),
-        vm_priv: false,
+        auth: Auth::Idrac8 {
+            st1,
+            st2,
+            aim_session: String::new(),
+            vm_priv: false,
+        },
     };
 
     let vars: serde_json::Value = authed_get(
@@ -93,23 +152,92 @@ pub fn login(client: &Client, host: &str, user: &str, password: &str) -> Result<
     .and_then(|r| r.json())
     .context("reading session variables")?;
     let vars = &vars["getSsnVar"];
-    session.aim_session = vars["aimSession"]
+    let aim = vars["aimSession"]
         .as_str()
         .context("no aimSession in session variables")?
         .to_string();
-    session.vm_priv = vars["accessVirtualMedia"].as_str() == Some("1");
+    let vm = vars["accessVirtualMedia"].as_str() == Some("1");
+    if let Auth::Idrac8 {
+        aim_session,
+        vm_priv,
+        ..
+    } = &mut session.auth
+    {
+        *aim_session = aim;
+        *vm_priv = vm;
+    }
     Ok(session)
 }
 
+/// iDRAC 9: the web UI sends the credentials as quoted header values.
+fn login9(client: &Client, host: &str, user: &str, password: &str) -> Result<Session> {
+    let resp = client
+        .post(format!("https://{host}{IDRAC9_SESSION}"))
+        .header("user", format!("\"{user}\""))
+        .header("password", format!("\"{password}\""))
+        .send()
+        .with_context(|| format!("connecting to https://{host}"))?;
+    let xsrf = resp
+        .headers()
+        .get("XSRF-TOKEN")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let cookie = resp
+        .cookies()
+        .find(|c| c.name() == SESSION_COOKIE)
+        .map(|c| c.value().to_string());
+    let reply: serde_json::Value = resp.json().context("reading login reply")?;
+    let auth_result = reply["authResult"].as_i64().unwrap_or(-1);
+    if auth_result != 0 {
+        let msg = match auth_result {
+            1 => "invalid username or password".to_string(),
+            5 => "too many sessions are open on the iDRAC".to_string(),
+            7 | 9 => "the iDRAC requires a password change; log in once in a browser".to_string(),
+            10 | 12 | 13 => "two-factor authentication is not supported yet".to_string(),
+            n => format!("login rejected (authResult {n})"),
+        };
+        let blocked = reply["blockingTime"].as_u64().unwrap_or(0);
+        let msg = if blocked > 0 {
+            format!("{msg} — login blocked for {blocked}s")
+        } else {
+            msg
+        };
+        bail!("{host}: {msg}");
+    }
+    Ok(Session {
+        host: host.to_string(),
+        user: user.to_string(),
+        cookie: cookie.context("login succeeded but no session cookie was set")?,
+        auth: Auth::Idrac9 {
+            xsrf: xsrf.context("login succeeded but no XSRF token was returned")?,
+        },
+    })
+}
+
+fn authed(
+    client: &Client,
+    method: reqwest::Method,
+    session: &Session,
+    path: &str,
+) -> RequestBuilder {
+    let req = client
+        .request(
+            method,
+            format!("https://{}/{}", session.host, path.trim_start_matches('/')),
+        )
+        .header("Cookie", format!("{SESSION_COOKIE}={}", session.cookie));
+    match &session.auth {
+        Auth::Idrac8 { st2, .. } => req.header("ST2", st2),
+        Auth::Idrac9 { xsrf } => req.header("XSRF-TOKEN", xsrf),
+    }
+}
+
 fn authed_get(client: &Client, session: &Session, path: &str) -> RequestBuilder {
-    client
-        .get(format!("https://{}/{path}", session.host))
-        .header("Cookie", format!("{SESSION_COOKIE}={}", session.cookie))
-        .header("ST2", &session.st2)
+    authed(client, reqwest::Method::GET, session, path)
 }
 
 /// The UI string table the viewer expects to find on `window.opener.top.localeObj`.
-pub fn locale(client: &Client, session: &Session, lang: &str) -> Result<serde_json::Value> {
+fn locale(client: &Client, session: &Session, lang: &str) -> Result<serde_json::Value> {
     let mut table: serde_json::Value =
         authed_get(client, session, &format!("locale/locale_{lang}.json"))
             .send()
@@ -120,11 +248,80 @@ pub fn locale(client: &Client, session: &Session, lang: &str) -> Result<serde_js
 }
 
 pub fn logout(client: &Client, session: &Session) -> Result<()> {
-    authed_get(client, session, "data/logout")
-        .timeout(Duration::from_secs(5))
+    let req = match session.auth {
+        Auth::Idrac8 { .. } => authed_get(client, session, "data/logout"),
+        Auth::Idrac9 { .. } => authed(client, reqwest::Method::DELETE, session, IDRAC9_SESSION),
+    };
+    req.timeout(Duration::from_secs(5))
         .send()
         .context("logging out")?;
     Ok(())
+}
+
+/// Everything a console tab needs to show the viewer for this session.
+pub fn console_page(
+    client: &Client,
+    session: &Session,
+    title: &str,
+    lang: &str,
+) -> Result<ConsolePage> {
+    match &session.auth {
+        Auth::Idrac8 { .. } => {
+            let locale = locale(client, session, lang)?;
+            Ok(ConsolePage {
+                url: console_url(session, title, lang).to_string(),
+                script: idrac8_opener_shim(&locale),
+                disconnect_js: Some(IDRAC8_DISCONNECT_JS),
+            })
+        }
+        Auth::Idrac9 { .. } => {
+            let reply: serde_json::Value = authed_get(client, session, IDRAC9_VCONSOLE)
+                .send()
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.json())
+                .context("asking the iDRAC to start a console session")?;
+            let location = reply["Location"]
+                .as_str()
+                .context("the iDRAC returned no console location")?;
+            idrac9_console_page(location)
+        }
+    }
+}
+
+/// What the iDRAC 8 viewer's "Disconnect Viewer" button runs, minus its `window.close()`.
+const IDRAC8_DISCONNECT_JS: &str =
+    "try { disconnectVM(); } catch (e) {} try { exitViewer(); } catch (e) {}";
+
+/// iDRAC 9 answers `GET …/vconsole` with the viewer URL, whose query carries the KVM session
+/// ids. The web UI strips the query, puts the ids into `sessionStorage` and opens the bare
+/// page as a popup (which inherits that storage); do the same with an injected script.
+fn idrac9_console_page(location: &str) -> Result<ConsolePage> {
+    let url = Url::parse(location).with_context(|| format!("bad console location {location:?}"))?;
+    let param = |name: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let mut items = serde_json::Map::new();
+    for key in ["ip", "kvmport", "VCSID", "VCSID2"] {
+        let value = param(key).with_context(|| format!("no {key} in the console location"))?;
+        items.insert(key.to_string(), value.into());
+    }
+    let mut page = url.clone();
+    page.set_query(None);
+    let path = page.path().to_string();
+    let items = serde_json::Value::Object(items);
+    Ok(ConsolePage {
+        url: page.to_string(),
+        script: format!(
+            r#"(function () {{
+    if (window.top !== window || location.pathname !== {path:?}) return;
+    var items = {items};
+    for (var k in items) sessionStorage.setItem(k, items[k]);
+}})();"#
+        ),
+        disconnect_js: None,
+    })
 }
 
 /// What Redfish says about the server behind the iDRAC.
@@ -171,21 +368,72 @@ pub fn identity(client: &Client, host: &str, user: &str, password: &str) -> Opti
 ///
 /// The viewer slices parameters out of the raw URL by position and decodes them with
 /// `decodeURIComponent`, so the order is fixed and spaces must be `%20`, not `+`.
-pub fn console_url(session: &Session, title: &str, lang: &str) -> Url {
+fn console_url(session: &Session, title: &str, lang: &str) -> Url {
+    let Auth::Idrac8 {
+        st1,
+        st2,
+        aim_session,
+        vm_priv,
+    } = &session.auth
+    else {
+        panic!("console_url is for iDRAC 8 sessions");
+    };
     let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
     let url = format!(
         "https://{host}/virtualconsolehtml5.html?ipAddr={ip}&kvmPort=5900&vmPriv={vm}\
          &title={title}&lang={lang}&aimSession={aim}&ST2={st2}&TokenName=ST1&TokenKey={st1}",
         host = session.host,
         ip = enc(&session.host),
-        vm = session.vm_priv,
+        vm = vm_priv,
         title = enc(&format!("{title}, User: {}", session.user)),
         lang = enc(lang),
-        aim = enc(&session.aim_session),
-        st2 = session.st2,
-        st1 = session.st1,
+        aim = enc(aim_session),
     );
     Url::parse(&url).expect("valid console URL")
+}
+
+/// The iDRAC 8 viewer page expects to be a popup of the iDRAC web UI and reads its string table
+/// from `window.opener.top.localeObj`; without an opener its setup script throws and the
+/// KVM never connects. Stand in for the web UI's main window, and for the certificate popup.
+fn idrac8_opener_shim(locale: &serde_json::Value) -> String {
+    format!(
+        r#"(function () {{
+    if (window.top !== window || window.opener) return;
+    var main = {{ localeObj: {locale}, htmlViewerWindow: null, activeXWindow: null }};
+    main.top = main;
+    try {{
+        Object.defineProperty(window, "opener", {{ value: main, configurable: true }});
+    }} catch (e) {{
+        window.opener = main;
+    }}
+
+    // Before connecting, the viewer opens https://<host>:5900/ in a popup so the user can
+    // accept that port's certificate, and waits for the popup to postMessage back. TLS errors
+    // are already ignored here, so answer on the popup's behalf.
+    var realOpen = window.open;
+    window.open = function (url) {{
+        var target;
+        try {{
+            target = new URL(url, location.href);
+        }} catch (e) {{
+            return realOpen.apply(window, arguments);
+        }}
+        if (target.origin === location.origin) return realOpen.apply(window, arguments);
+        var popup = {{
+            closed: false,
+            close: function () {{ popup.closed = true; }},
+            postMessage: function () {{
+                if (popup.answered) return;
+                popup.answered = true;
+                setTimeout(function () {{
+                    window.dispatchEvent(new MessageEvent("message", {{ data: "accepted", origin: target.origin }}));
+                }}, 0);
+            }},
+        }};
+        return popup;
+    }};
+}})();"#
+    )
 }
 
 fn xml_tag<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
@@ -260,10 +508,12 @@ mod tests {
             host: "192.0.2.10".into(),
             user: "admin".into(),
             cookie: String::new(),
-            st1: "0123456789abcdef0123456789abcdef".into(),
-            st2: "fedcba9876543210fedcba9876543210".into(),
-            aim_session: "1".into(),
-            vm_priv: true,
+            auth: Auth::Idrac8 {
+                st1: "0123456789abcdef0123456789abcdef".into(),
+                st2: "fedcba9876543210fedcba9876543210".into(),
+                aim_session: "1".into(),
+                vm_priv: true,
+            },
         };
         let url = console_url(&session, "idrac-ABC1234, PowerEdge R630", "en");
         assert!(!url.as_str().contains('+'), "spaces must be %20: {url}");
@@ -282,5 +532,45 @@ mod tests {
         assert_eq!(get("ST2"), Some("fedcba9876543210fedcba9876543210"));
         assert_eq!(get("TokenName"), Some("ST1"));
         assert_eq!(get("TokenKey"), Some("0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn tells_generations_apart_by_redirect() {
+        assert_eq!(
+            generation_from_path("/restgui/start.html"),
+            Generation::Idrac9
+        );
+        assert_eq!(generation_from_path("/start.html"), Generation::Idrac8);
+        assert_eq!(generation_from_path("/"), Generation::Idrac8);
+    }
+
+    #[test]
+    fn idrac9_console_page_moves_session_ids_into_storage() {
+        let page = idrac9_console_page(
+            "https://idrac-r6515.example.lan:443/restgui/vconsole/index.html?ip=idrac-r6515.example.lan\
+             &kvmport=443&title=idrac-ABC1234,%20PowerEdge%20R6515,%20User:%20admin\
+             &VCSID=0123456789abcdef&VCSID2=fedcba9876543210",
+        )
+        .unwrap();
+        assert_eq!(
+            page.url,
+            "https://idrac-r6515.example.lan/restgui/vconsole/index.html"
+        );
+        assert!(!page.url.contains("VCSID"), "ids must not be in the URL");
+        for expected in [
+            r#""VCSID":"0123456789abcdef""#,
+            r#""VCSID2":"fedcba9876543210""#,
+            r#""ip":"idrac-r6515.example.lan""#,
+            r#""kvmport":"443""#,
+            r#""/restgui/vconsole/index.html""#,
+        ] {
+            assert!(
+                page.script.contains(expected),
+                "{expected} missing in {}",
+                page.script
+            );
+        }
+        assert!(page.disconnect_js.is_none());
+        assert!(idrac9_console_page("https://h/restgui/vconsole/index.html?ip=h").is_err());
     }
 }

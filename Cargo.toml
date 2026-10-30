@@ -2,7 +2,7 @@
 name = "rustdrac"
 version = "0.1.0"
 edition = "2024"
-description = "Rust Drac: Dell iDRAC 8 console launcher, address book, health and SEL viewer"
+description = "Rust Drac: Dell iDRAC 8/9 console launcher, address book, health and SEL viewer"
 license = "MIT"
 authors = ["Karubits <karubits@proton.me>"]
 rust-version = "1.88"

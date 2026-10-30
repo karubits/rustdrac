@@ -11,17 +11,14 @@ use reqwest::blocking::Client;
 use webkit2gtk::{
     CookieManagerExt, SettingsExt, TLSErrorsPolicy, URIRequestExt, URIResponseExt,
     UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
-    UserScriptInjectionTime, WebContext, WebResourceExt, WebView, WebViewExt, WebsiteDataManager,
-    WebsiteDataManagerExt,
+    UserScriptInjectionTime, WebContext, WebContextExt, WebResourceExt, WebView, WebViewExt,
+    WebsiteDataManager, WebsiteDataManagerExt,
 };
 
 use crate::idrac;
 
 const LANG: &str = "en";
 
-/// What the viewer's "Disconnect Viewer" button runs, minus its `window.close()`.
-const DISCONNECT_JS: &str =
-    "try { disconnectVM(); } catch (e) {} try { exitViewer(); } catch (e) {}";
 const DISCONNECT_GRACE: Duration = Duration::from_millis(1500);
 const MAX_LOAD_RETRIES: u32 = 3;
 
@@ -52,7 +49,10 @@ pub struct Hooks {
 
 enum State {
     Connecting,
-    Connected(idrac::Session),
+    Connected {
+        session: idrac::Session,
+        disconnect_js: Option<&'static str>,
+    },
     Failed,
     /// Closed while still logging in; the login task will log out and finish.
     ClosingWhileConnecting,
@@ -82,7 +82,7 @@ pub struct ConsoleTab(Rc<Inner>);
 struct Connected {
     session: idrac::Session,
     identity: Option<idrac::Identity>,
-    locale: serde_json::Value,
+    page: idrac::ConsolePage,
 }
 
 impl ConsoleTab {
@@ -268,12 +268,15 @@ impl ConsoleTab {
                 *self.0.title.borrow_mut() = title.clone();
                 (self.0.hooks.on_title)(&self.widget(), &title);
 
-                let view = self.build_webview(&c.session, &c.locale, &title);
+                let view = self.build_webview(&c.session, &c.page);
                 self.0.stack.add_named(&view, "console");
                 view.show();
                 self.0.stack.set_visible_child_name("console");
                 *self.0.webview.borrow_mut() = Some(view);
-                *self.0.state.borrow_mut() = State::Connected(c.session);
+                *self.0.state.borrow_mut() = State::Connected {
+                    session: c.session,
+                    disconnect_js: c.page.disconnect_js,
+                };
                 self.focus();
             }
         }
@@ -281,9 +284,10 @@ impl ConsoleTab {
 
     /// Disconnect the console and log out, then remove the tab.
     ///
-    /// Just dropping the KVM WebSocket would leave the iDRAC with a stale console session
-    /// ("A session to this device already exists"), so disconnect the way the viewer's
-    /// "Disconnect Viewer" button does, give it a moment to reach the iDRAC, then log out.
+    /// On iDRAC 8, just dropping the KVM WebSocket leaves a stale console session ("A session
+    /// to this device already exists"), so disconnect the way the viewer's "Disconnect Viewer"
+    /// button does. iDRAC 9's viewer has no global hook; unloading the page closes its socket.
+    /// Either way, give it a moment to reach the iDRAC, then log out.
     pub fn close(&self) {
         let state = std::mem::replace(&mut *self.0.state.borrow_mut(), State::Closing);
         match state {
@@ -291,19 +295,25 @@ impl ConsoleTab {
                 *self.0.state.borrow_mut() = State::ClosingWhileConnecting;
                 self.0.status.set_text("Cancelling…");
             }
-            State::Connected(session) => {
+            State::Connected {
+                session,
+                disconnect_js,
+            } => {
                 self.0
                     .tab_label
                     .set_text(&format!("{} (closing)", self.0.target.name));
                 self.set_busy(true);
                 if let Some(view) = self.webview() {
-                    view.evaluate_javascript(
-                        DISCONNECT_JS,
-                        None,
-                        None,
-                        None::<&gtk::gio::Cancellable>,
-                        |_| {},
-                    );
+                    match disconnect_js {
+                        Some(js) => view.evaluate_javascript(
+                            js,
+                            None,
+                            None,
+                            None::<&gtk::gio::Cancellable>,
+                            |_| {},
+                        ),
+                        None => view.load_uri("about:blank"),
+                    }
                 }
                 let weak = self.downgrade();
                 glib::timeout_add_local_once(DISCONNECT_GRACE, move || {
@@ -343,19 +353,16 @@ impl ConsoleTab {
         (self.0.hooks.on_closed)(&self.widget());
     }
 
-    fn build_webview(
-        &self,
-        session: &idrac::Session,
-        locale: &serde_json::Value,
-        title: &str,
-    ) -> WebView {
+    fn build_webview(&self, session: &idrac::Session, page: &idrac::ConsolePage) -> WebView {
         // Ephemeral per tab: separate cookies per iDRAC session, nothing written to disk.
         let data = WebsiteDataManager::new_ephemeral();
         data.set_tls_errors_policy(TLSErrorsPolicy::Ignore);
         let context = WebContext::with_website_data_manager(&data);
+        // navigator.language picks the viewer's UI language; the process locale may be "C".
+        context.set_preferred_languages(&["en-US"]);
         let scripts = UserContentManager::new();
         scripts.add_script(&UserScript::new(
-            &opener_shim(locale),
+            &page.script,
             UserContentInjectedFrames::TopFrame,
             UserScriptInjectionTime::Start,
             &[],
@@ -419,7 +426,7 @@ impl ConsoleTab {
             }
         });
 
-        let console_url = idrac::console_url(session, title, LANG).to_string();
+        let console_url = page.url.clone();
         let mut cookie = soup::Cookie::new(
             idrac::SESSION_COOKIE,
             &session.cookie,
@@ -459,59 +466,19 @@ fn centered_box() -> gtk::Box {
 fn connect_blocking(client: &Client, target: &Target) -> Result<Connected> {
     let session = idrac::login(client, &target.host, &target.user, &target.password)?;
     let identity = idrac::identity(client, &target.host, &target.user, &target.password);
-    match idrac::locale(client, &session, LANG) {
-        Ok(locale) => Ok(Connected {
+    let title = identity
+        .as_ref()
+        .and_then(|i| i.title())
+        .unwrap_or_else(|| target.host.clone());
+    match idrac::console_page(client, &session, &title, LANG) {
+        Ok(page) => Ok(Connected {
             session,
             identity,
-            locale,
+            page,
         }),
         Err(e) => {
             let _ = idrac::logout(client, &session);
             Err(e)
         }
     }
-}
-
-/// The viewer page expects to be a popup of the iDRAC web UI and reads its string table
-/// from `window.opener.top.localeObj`; without an opener its setup script throws and the
-/// KVM never connects. Stand in for the web UI's main window, and for the certificate popup.
-fn opener_shim(locale: &serde_json::Value) -> String {
-    format!(
-        r#"(function () {{
-    if (window.top !== window || window.opener) return;
-    var main = {{ localeObj: {locale}, htmlViewerWindow: null, activeXWindow: null }};
-    main.top = main;
-    try {{
-        Object.defineProperty(window, "opener", {{ value: main, configurable: true }});
-    }} catch (e) {{
-        window.opener = main;
-    }}
-
-    // Before connecting, the viewer opens https://<host>:5900/ in a popup so the user can
-    // accept that port's certificate, and waits for the popup to postMessage back. TLS errors
-    // are already ignored here, so answer on the popup's behalf.
-    var realOpen = window.open;
-    window.open = function (url) {{
-        var target;
-        try {{
-            target = new URL(url, location.href);
-        }} catch (e) {{
-            return realOpen.apply(window, arguments);
-        }}
-        if (target.origin === location.origin) return realOpen.apply(window, arguments);
-        var popup = {{
-            closed: false,
-            close: function () {{ popup.closed = true; }},
-            postMessage: function () {{
-                if (popup.answered) return;
-                popup.answered = true;
-                setTimeout(function () {{
-                    window.dispatchEvent(new MessageEvent("message", {{ data: "accepted", origin: target.origin }}));
-                }}, 0);
-            }},
-        }};
-        return popup;
-    }};
-}})();"#
-    )
 }

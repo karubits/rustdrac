@@ -6,6 +6,22 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 
 ## 2026-10-30
 
+iDRAC 9 support (after v0.1.0, the same day).
+
+### Added
+- **iDRAC 9.** The virtual console, Health & SEL and the alarm checker work on iDRAC 9. Tested on PowerEdge R6515 with iDRAC 9 firmware 7.10.30.
+  - The iDRAC generation is detected automatically, so address-book entries need no new setting.
+  - Login uses the iDRAC 9 session API. The noVNC viewer gets its KVM session ids the way Dell's web UI hands them over, so they never appear in the URL.
+  - Closing a tab unloads the viewer and deletes the session; reconnecting right away doesn't hit the "share this session" prompt.
+
+### Fixed
+- The viewer's UI language is set to English when the system locale is `C`. The iDRAC 9 viewer used to request a missing `c.json` locale file.
+
+### Known Issues
+- iDRAC 9 two-factor (TFA/RSA) logins and the "password must be changed" state are reported as errors, not handled.
+
+## 2026-10-30
+
 First release (v0.1.0).
 
 ### Added
@@ -44,5 +60,4 @@ First release (v0.1.0).
 ### Known Issues
 - The console needs a GPU render node (`/dev/dri`). Desktops and most VMs with a virtual GPU have one; without it, WebKit's web process stalls and the console page never loads. The address book and Health & SEL still work.
 - The AppImage needs glibc 2.36 or newer (Debian 12, Ubuntu 23.04, Fedora 37 and later).
-- Only iDRAC 8 is supported; iDRAC 9 uses a different console.
 - iDRAC 8 Redfish is slow (about 5 s per request plus a TLS handshake), so a full Health & SEL read of an R630 takes about a minute.
