@@ -14,8 +14,8 @@ on:
     - cron: "0 1 * * 1" # Monday 01:00 UTC: catch newly published advisories
   workflow_dispatch:
 
-permissions:
-  contents: read
+# No `permissions:` block: Forgejo ignores it (and warns). A GitHub copy of this workflow
+# should add `permissions: {contents: read}` so its token is read-only.
 
 env:
   # Node-based actions ignore the system CA store; point them at it.

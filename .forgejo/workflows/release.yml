@@ -14,8 +14,8 @@ on:
         description: "Existing tag to (re)build, e.g. v0.1.0"
         required: true
 
-permissions:
-  contents: write
+# No `permissions:` block: Forgejo ignores it (and warns). A GitHub copy of this workflow
+# should add `permissions: {contents: write}` so its token is write (it creates the release).
 
 env:
   NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
