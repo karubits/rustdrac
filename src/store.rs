@@ -185,6 +185,25 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
+fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// `~/x` as `/home/me/x`; anything else unchanged.
+pub fn expand_home(dir: &str) -> PathBuf {
+    match dir.strip_prefix("~/") {
+        Some(rel) => home_dir().join(rel),
+        None => PathBuf::from(dir),
+    }
+}
+
+/// `~/Pictures/Rust Drac` (the desktop's Pictures folder).
+pub fn default_screenshot_dir() -> PathBuf {
+    dirs::picture_dir()
+        .unwrap_or_else(|| home_dir().join("Pictures"))
+        .join("Rust Drac")
+}
+
 fn config_path(app: &str) -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -288,14 +307,19 @@ impl Store {
     }
 
     pub fn screenshot_dir(&self) -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        match self.defaults.screenshot_dir.as_deref() {
-            Some(dir) if dir.starts_with("~/") => home.join(&dir[2..]),
-            Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-            _ => dirs::picture_dir()
-                .unwrap_or_else(|| home.join("Pictures"))
-                .join("Rust Drac"),
+        match self.defaults.screenshot_dir.as_deref().map(str::trim) {
+            Some(dir) if !dir.is_empty() => expand_home(dir),
+            _ => default_screenshot_dir(),
         }
+    }
+
+    /// Set the screenshot folder as typed in Settings. Empty, or the default folder, clears
+    /// the setting; a folder under the home directory is written as `~/…`.
+    pub fn set_screenshot_dir(&mut self, dir: &str) {
+        let dir = expand_home(dir.trim());
+        self.defaults.screenshot_dir = (!dir.as_os_str().is_empty()
+            && dir != default_screenshot_dir())
+        .then(|| display_path(&dir));
     }
 
     pub fn default_user(&self) -> String {
@@ -376,6 +400,25 @@ mod tests {
         assert_eq!(loaded.connections[0].display_name(), "10.0.0.1");
         assert_eq!(loaded.find("10.0.0.2").unwrap().address, "10.0.0.2");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn screenshot_dir_setting() {
+        let mut store = Store::default();
+        assert_eq!(store.screenshot_dir(), default_screenshot_dir());
+        store.set_screenshot_dir(&default_screenshot_dir().display().to_string());
+        assert_eq!(store.defaults.screenshot_dir, None);
+        store.set_screenshot_dir("  ");
+        assert_eq!(store.defaults.screenshot_dir, None);
+
+        let home = home_dir();
+        store.set_screenshot_dir(&home.join("Shots").display().to_string());
+        assert_eq!(store.defaults.screenshot_dir.as_deref(), Some("~/Shots"));
+        assert_eq!(store.screenshot_dir(), home.join("Shots"));
+        store.set_screenshot_dir("~/Other ");
+        assert_eq!(store.screenshot_dir(), home.join("Other"));
+        store.set_screenshot_dir("/srv/shots");
+        assert_eq!(store.defaults.screenshot_dir.as_deref(), Some("/srv/shots"));
     }
 
     /// Touches the real desktop keyring: `cargo test -- --ignored keyring`.

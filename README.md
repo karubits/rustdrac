@@ -1,14 +1,43 @@
+<div align="center">
+
+<img src="packaging/rustdrac.svg" width="120" alt="Rust Drac icon">
+
 # Rust Drac
 
-A native app for Dell **iDRAC 8 and iDRAC 9** servers (PowerEdge 13th–15th generation and later):
-- the HTML5 virtual console in tabs, with no browser, no login page and no certificate warning;
-- an address book;
-- a health and System Event Log (SEL) viewer;
-- a background alarm checker.
+**A fast, native Linux app for Dell iDRAC 8 & iDRAC 9 servers. Made with Rust 🦀**
 
-<p align="center"><img src="packaging/rustdrac.svg" width="96" alt="Rust Drac icon"></p>
+Virtual console in tabs · address book · health & SEL viewer · background alarms.<br>
+No browser, no Java, no login page, no certificate warnings.
+
+[![CI](https://github.com/karubits/rustdrac/actions/workflows/ci.yml/badge.svg)](https://github.com/karubits/rustdrac/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/karubits/rustdrac?logo=github&color=orange)](https://github.com/karubits/rustdrac/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/karubits/rustdrac/total?color=orange)](https://github.com/karubits/rustdrac/releases)
+[![License: MIT](https://img.shields.io/github/license/karubits/rustdrac?color=blue)](LICENSE)
+<br>
+[![Made with Rust](https://img.shields.io/badge/made%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Rust 1.88+](https://img.shields.io/badge/rustc-1.88%2B-dea584?logo=rust&logoColor=white)](Cargo.toml)
+[![GTK 3](https://img.shields.io/badge/GTK-3-4a86cf?logo=gnome&logoColor=white)](https://www.gtk.org/)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux%20x86--64-informational?logo=linux&logoColor=white)](#download)
+[![iDRAC 8 | 9](https://img.shields.io/badge/Dell%20iDRAC-8%20%7C%209-0076ce?logo=dell&logoColor=white)](#how-it-works)
+
+[Download](#download) · [Features](#features) · [Usage](#usage) · [Build](#build-from-source) · [Contributing](#contributing)
 
 ![Connection manager](docs/screenshots/connections.png)
+
+</div>
+
+## Features
+
+| | |
+|---|---|
+| 🖥️ **Virtual console in tabs** | Dell's HTML5 KVM viewer for iDRAC 8 and 9, opened straight from the app with no login page or certificate prompt. Several servers side by side. |
+| 📒 **Address book** | Groups, tags, notes, and instant search across every field. Service tag and model fill themselves in from Redfish. |
+| ❤️ **Health & SEL** | Every component and sensor, plus the full System Event Log with filtering, search, CSV export and clearing. |
+| 🔔 **Alarm checker** | Polls your servers in the background and sends a desktop notification when one turns Warning or Critical. |
+| 📸 **Screenshots & log export** | One-click PNG of the console, and a zip with a hardware summary, health, SEL and Lifecycle log for support cases. |
+| 🔐 **Keyring passwords** | Passwords go to GNOME Keyring or KWallet, never into the config file. |
+| 🌗 **Dark by default** | A polished dark theme with an orange accent, or follow your desktop theme. |
+| 📦 **One-file download** | A self-contained AppImage that runs on any recent x86-64 Linux. |
 
 ## Download
 
@@ -50,7 +79,7 @@ Each console opens in its own tab. To close one, use the tab's ✕ or the viewer
 ## Screenshots and log export
 
 The header bar has two actions for the server in the current tab:
-- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. Set `defaults.screenshot_dir` to change the folder. A notice offers **Open Folder**.
+- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. To change the folder, open **☰ → Settings…** (or set `defaults.screenshot_dir`). A notice offers **Open Folder**.
 - **Export Logs** (console and Health tabs, and the address book's right-click menu) saves a zip for a support case or an audit:
 
   | File | Contents |
@@ -109,6 +138,12 @@ connections:
 
 Passwords are **never written to the YAML file**. If you tick *Save password in the system keyring*, the password goes into the desktop keyring via Secret Service (GNOME Keyring or KWallet) under the service `rustdrac`, keyed by the connection `id`. Saved passwords don't travel with a copied config file; on a new machine you're asked for each password once.
 
+## Settings and About
+
+The **☰** menu at the right of the header bar has:
+- **Settings…**: choose the screenshot folder (type a path, **Browse…**, or ↶ for the default). It is saved as `defaults.screenshot_dir` in the config file.
+- **About Rust Drac**: the version, a link to the source code on GitHub, the licence, and how to contribute.
+
 ## Look
 
 Dark mode is the default: Adwaita dark plus the app's own stylesheet with an orange accent. `--theme light` or `--theme system` (or `defaults.theme`) switch it off; `system` follows your desktop's GTK theme.
@@ -162,7 +197,7 @@ scripts/build-appimage.sh
 
 ## Development
 
-Every push runs these checks in CI (`.forgejo/workflows/ci.yml`):
+Every push and pull request runs these checks in CI (`.github/workflows/ci.yml`):
 
 | Check | Tool |
 |---|---|
@@ -186,7 +221,7 @@ bin/gitleaks git --config .gitleaks.toml . && bin/betterleaks git --config .gitl
 
 1. Add the changes under a `## YYYY-MM-DD` heading (today) at the top of `CHANGELOG.md` and commit.
 2. Run `scripts/release.sh X.Y.Z`. It sets the version in `Cargo.toml`, runs the tests, commits, creates the annotated tag `vX.Y.Z` and pushes.
-3. The tag starts `.forgejo/workflows/release.yml`, which:
+3. The tag starts `.github/workflows/release.yml`, which:
    - checks the tag matches `Cargo.toml`;
    - builds the AppImage and tarball and smoke-tests the AppImage;
    - publishes a release with the files and `SHA256SUMS`, using that CHANGELOG section as the notes.
@@ -211,6 +246,19 @@ To test the log export against a real iDRAC (it writes `rustdrac-export-test.zip
 RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored export_from_a_real_idrac --nocapture
 ```
 
+## Contributing
+
+Contributions are very welcome, from bug reports to pull requests! 🙌
+
+- 🐛 **Found a bug or have an idea?** [Open an issue](https://github.com/karubits/rustdrac/issues). Include your iDRAC version, server model and what you expected.
+- 🔧 **Want to fix something?** Fork the repo, make your change on a branch, and [open a pull request](https://github.com/karubits/rustdrac/pulls).
+- ✅ Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before you push (see [Development](#development)).
+- ⭐ **Like it?** Star the repo so other iDRAC wranglers can find it.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the details.
+
 ## License
 
 [MIT](LICENSE) © Karubits
+
+<div align="center"><sub>Made with Rust 🦀, GTK and WebKitGTK. Not affiliated with Dell Technologies; iDRAC and PowerEdge are trademarks of Dell Inc.</sub></div>

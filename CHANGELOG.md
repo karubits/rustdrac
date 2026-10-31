@@ -4,6 +4,18 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## 2026-10-31
+
+Now published on GitHub: https://github.com/karubits/rustdrac
+
+### Added
+- **Settings.** A ☰ menu in the header bar opens Settings, where you choose the screenshot folder (type it, browse for it, or reset to `~/Pictures/Rust Drac`). It is saved as `defaults.screenshot_dir`.
+- **About dialog.** Shows the version, a link to the source code on GitHub, the licence and how to contribute.
+- `CONTRIBUTING.md`, and badges and a feature overview in the README.
+
+### Changed
+- CI and releases run on GitHub Actions (`.github/workflows/`), building in a Debian 12 container as before.
+
 ## 2026-10-30
 
 iDRAC 9 support (after v0.1.0, the same day).

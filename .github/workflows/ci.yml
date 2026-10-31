@@ -1,4 +1,3 @@
----
 # CI: Rust checks, dependency policy and secret scanning on every push and PR.
 # Releases (release.yml) run on version tags; tag pushes are skipped here.
 name: CI
@@ -14,20 +13,20 @@ on:
     - cron: "0 1 * * 1" # Monday 01:00 UTC: catch newly published advisories
   workflow_dispatch:
 
-# No `permissions:` block: Forgejo ignores it (and warns). A GitHub copy of this workflow
-# should add `permissions: {contents: read}` so its token is read-only.
+permissions:
+  contents: read
 
 env:
-  # Node-based actions ignore the system CA store; point them at it.
-  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
   CARGO_TERM_COLOR: always
 
 jobs:
   rust:
     name: Rust (fmt, clippy, test, cargo-deny)
-    runs-on: k8s-dmz
+    runs-on: ubuntu-latest
+    # Debian 12: the oldest supported base, same as the release build.
+    container: node:22-bookworm
     steps:
-      - uses: https://github.com/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Build dependencies and toolchain
@@ -45,9 +44,9 @@ jobs:
 
   secrets:
     name: Secret scanning (gitleaks, betterleaks)
-    runs-on: k8s-dmz
+    runs-on: ubuntu-latest
     steps:
-      - uses: https://github.com/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # full history: a leak in an old commit still counts
           persist-credentials: false
@@ -63,11 +62,9 @@ jobs:
 
   scripts:
     name: Shell scripts (shellcheck)
-    runs-on: k8s-dmz
+    runs-on: ubuntu-latest
     steps:
-      - uses: https://github.com/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: |
-          apt-get update -qq && apt-get install -y -qq shellcheck >/dev/null
-          shellcheck -S warning scripts/*.sh
+      - run: shellcheck -S warning scripts/*.sh

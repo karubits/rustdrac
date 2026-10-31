@@ -7,7 +7,7 @@ sudo=""
 [ "$(id -u)" -eq 0 ] || sudo=sudo
 export DEBIAN_FRONTEND=noninteractive
 # curl, git and ca-certificates come with the job image. Don't reinstall ca-certificates:
-# its post-install script fails on runners that inject a corporate CA into the bundle.
+# its post-install script fails on runners that inject their own CA into the bundle.
 for tool in curl git; do command -v "$tool" >/dev/null || missing="${missing:-} $tool"; done
 $sudo apt-get update -qq
 $sudo apt-get install -y -q --no-install-recommends \

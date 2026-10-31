@@ -29,6 +29,7 @@ use redfish::{Health, Redfish};
 use store::{Connection, Store};
 
 const APP_TITLE: &str = "Rust Drac";
+const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// Dell iDRAC 8/9 HTML5 virtual console, without a browser.
 ///
@@ -140,6 +141,21 @@ impl App {
             "document-save-symbolic",
             "Save a zip with a hardware summary, health, the SEL and the Lifecycle log",
         );
+        let settings_item = gtk::MenuItem::with_label("Settings…");
+        let about_item = gtk::MenuItem::with_label("About Rust Drac");
+        let menu = gtk::Menu::new();
+        menu.append(&settings_item);
+        menu.append(&about_item);
+        menu.show_all();
+        let menu_button = gtk::MenuButton::builder()
+            .popup(&menu)
+            .tooltip_text("Menu")
+            .image(&gtk::Image::from_icon_name(
+                Some("open-menu-symbolic"),
+                gtk::IconSize::Button,
+            ))
+            .build();
+        header.pack_end(&menu_button);
         header.pack_end(&export_button);
         header.pack_end(&screenshot_button);
         let notebook = gtk::Notebook::builder()
@@ -270,6 +286,18 @@ impl App {
                 app.export_current();
             }
         });
+        let weak = app.downgrade();
+        settings_item.connect_activate(move |_| {
+            if let Some(app) = upgrade(&weak) {
+                app.show_settings();
+            }
+        });
+        let weak = app.downgrade();
+        about_item.connect_activate(move |_| {
+            if let Some(app) = upgrade(&weak) {
+                app.show_about();
+            }
+        });
 
         app.0.window.show_all();
         app.0.toast.revealer.set_reveal_child(false);
@@ -307,6 +335,138 @@ impl App {
                 Err(e) => app.0.toast.show(&format!("Screenshot failed: {e:#}"), None),
             }
         });
+    }
+
+    /// Settings: the screenshot folder (`defaults.screenshot_dir` in connections.yaml).
+    fn show_settings(&self) {
+        let window = &self.0.window;
+        let dialog = gtk::Dialog::with_buttons(
+            Some("Settings"),
+            Some(window),
+            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+            &[
+                ("Cancel", gtk::ResponseType::Cancel),
+                ("Save", gtk::ResponseType::Accept),
+            ],
+        );
+        dialog.set_default_size(520, -1);
+        dialog.set_default_response(gtk::ResponseType::Accept);
+        if let Some(save) = dialog.widget_for_response(gtk::ResponseType::Accept) {
+            save.style_context().add_class("suggested-action");
+        }
+
+        let title = gtk::Label::new(None);
+        title.set_markup("<b>Screenshot folder</b>");
+        title.set_xalign(0.0);
+        let entry = gtk::Entry::new();
+        entry.set_hexpand(true);
+        entry.set_activates_default(true);
+        entry.set_text(&store::display_path(
+            &self.0.store.borrow().screenshot_dir(),
+        ));
+        let browse = gtk::Button::with_label("Browse…");
+        let reset = gtk::Button::from_icon_name(Some("edit-undo-symbolic"), gtk::IconSize::Button);
+        reset.set_tooltip_text(Some("Use the default folder"));
+        let hint = gtk::Label::new(Some(
+            "The Screenshot button saves console pictures here as PNG files.",
+        ));
+        hint.set_xalign(0.0);
+        hint.set_line_wrap(true);
+        hint.style_context().add_class("dim-label");
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add(&entry);
+        row.add(&browse);
+        row.add(&reset);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        content.set_border_width(16);
+        content.add(&title);
+        content.add(&row);
+        content.add(&hint);
+        dialog.content_area().add(&content);
+
+        let (d, e) = (dialog.clone(), entry.clone());
+        browse.connect_clicked(move |_| {
+            let chooser = gtk::FileChooserNative::new(
+                Some("Screenshot Folder"),
+                Some(&d),
+                gtk::FileChooserAction::SelectFolder,
+                Some("Select"),
+                Some("Cancel"),
+            );
+            let dir = store::expand_home(e.text().trim());
+            if dir.is_dir() {
+                chooser.set_current_folder(dir);
+            }
+            if chooser.run() == gtk::ResponseType::Accept
+                && let Some(path) = chooser.filename()
+            {
+                e.set_text(&store::display_path(&path));
+            }
+        });
+        let e = entry.clone();
+        reset.connect_clicked(move |_| {
+            e.set_text(&store::display_path(&store::default_screenshot_dir()));
+        });
+
+        dialog.show_all();
+        let response = dialog.run();
+        let text = entry.text();
+        // SAFETY: the dialog is not used after this point.
+        unsafe { dialog.destroy() };
+        if response != gtk::ResponseType::Accept {
+            return;
+        }
+        let mut store = self.0.store.borrow_mut();
+        store.set_screenshot_dir(&text);
+        let saved = store.save();
+        drop(store);
+        match saved {
+            Ok(()) => self.0.toast.show(
+                &format!(
+                    "Screenshots will be saved to {}",
+                    store::display_path(&self.0.store.borrow().screenshot_dir())
+                ),
+                None,
+            ),
+            Err(e) => error_dialog(Some(window), &format!("{e:#}")),
+        }
+    }
+
+    fn show_about(&self) {
+        let dialog = gtk::AboutDialog::builder()
+            .transient_for(&self.0.window)
+            .modal(true)
+            .program_name(APP_TITLE)
+            .version(env!("CARGO_PKG_VERSION"))
+            .comments(
+                "A native app for Dell iDRAC 8 and iDRAC 9 servers: the HTML5 virtual console \
+                 in tabs, an address book, a health and System Event Log viewer and a \
+                 background alarm checker.\n\n\
+                 Made with Rust 🦀, GTK 3 and WebKitGTK.\n\n\
+                 Rust Drac is free software. Contributions are welcome: report a bug or \
+                 suggest a feature in GitHub Issues, or fork the repository and open a pull \
+                 request (see Credits for the links).",
+            )
+            .website(REPO_URL)
+            .website_label("Source code on GitHub")
+            .authors(vec!["Karubits".to_string()])
+            .copyright("© 2026 Karubits")
+            .license_type(gtk::License::MitX11)
+            .build();
+        if let Some(logo) = icon_pixbuf(include_bytes!("../packaging/icons/rustdrac-128.png")) {
+            dialog.set_logo(Some(&logo));
+        }
+        dialog.add_credit_section(
+            "Contribute",
+            &[
+                &format!("Report a bug or request a feature {REPO_URL}/issues"),
+                &format!("Open a pull request {REPO_URL}/pulls"),
+                &format!("Contributing guide {REPO_URL}/blob/master/CONTRIBUTING.md"),
+            ],
+        );
+        dialog.connect_response(|d, _| d.close());
+        dialog.show_all();
     }
 
     /// Export logs for the server of the current console or health tab.
@@ -920,12 +1080,16 @@ fn use_software_gl_without_gpu() {
 
 /// The app icon, built in so windows and dialogs have it even when not installed.
 fn set_default_icon() {
-    const ICON: &[u8] = include_bytes!("../packaging/icons/rustdrac-256.png");
-    let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from_static(ICON));
-    match gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, None::<&gtk::gio::Cancellable>) {
-        Ok(icon) => gtk::Window::set_default_icon(&icon),
-        Err(e) => eprintln!("rustdrac: app icon: {e}"),
+    if let Some(icon) = icon_pixbuf(include_bytes!("../packaging/icons/rustdrac-256.png")) {
+        gtk::Window::set_default_icon(&icon);
     }
+}
+
+fn icon_pixbuf(png: &'static [u8]) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    let stream = gtk::gio::MemoryInputStream::from_bytes(&glib::Bytes::from_static(png));
+    gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, None::<&gtk::gio::Cancellable>)
+        .inspect_err(|e| eprintln!("rustdrac: app icon: {e}"))
+        .ok()
 }
 
 /// Server details for [`App::export_logs`].

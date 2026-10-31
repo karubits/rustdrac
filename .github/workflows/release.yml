@@ -1,0 +1,98 @@
+# Release: push a tag vX.Y.Z (scripts/release.sh does it) and this builds the AppImage and
+# tarball, then publishes a release with them and SHA256SUMS. The release notes are the
+# newest CHANGELOG.md section. Draft first, files attached, then published, so "latest"
+# never points at a release without its downloads.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Build on Debian 12 (glibc 2.36), the oldest supported base: the AppImage runs on
+    # systems with the same or newer glibc.
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          [ "$TAG" = "v$version" ] || { echo "tag $TAG does not match Cargo.toml version $version" >&2; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build dependencies and toolchain
+        run: scripts/ci-deps.sh
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Build AppImage and tarball
+        run: |
+          scripts/install-tools.sh linuxdeploy appimagetool
+          scripts/build-appimage.sh
+
+      - name: Smoke-test the AppImage
+        run: APPIMAGE_EXTRACT_AND_RUN=1 "dist/rustdrac-$VERSION-x86_64.AppImage" --version
+
+      - name: Release notes (the newest CHANGELOG.md section)
+        run: |
+          awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 > dist/NOTES.md
+          printf '\n---\nDownload **rustdrac-%s-x86_64.AppImage**, `chmod +x` it and run it. Check it against `SHA256SUMS`.\n' \
+            "$VERSION" >> dist/NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create draft release, attach files, publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # Remove a leftover draft of this tag from a failed run.
+          if gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null | grep -q true; then
+            echo "Removing leftover draft $TAG"; gh release delete "$TAG" --yes
+          fi
+          prerelease=""
+          case $TAG in *-*) prerelease=--prerelease ;; esac
+          gh release create "$TAG" --verify-tag --draft $prerelease \
+            --title "Rust Drac $TAG" --notes-file dist/NOTES.md \
+            dist/*.AppImage dist/*.tar.gz dist/SHA256SUMS
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json url,assets --jq '"Released \(.url) with \(.assets | length) files"'

@@ -51,7 +51,7 @@ impl Theme {
 const BASE_CSS: &str = r#"
 @define-color accent #e76125;
 @define-color accent_hover #f07a43;
-@define-color brand_red #d21419;
+@define-color danger #d21419;
 
 * { font-family: "Roboto", "Noto Sans", "Cantarell", sans-serif; }
 
@@ -71,7 +71,7 @@ notebook > header.top tab button {
     min-width: 20px; min-height: 20px; padding: 0; margin-left: 4px;
     border-radius: 10px;
 }
-notebook > header.top tab button:hover { background: alpha(@brand_red, 0.85); color: white; }
+notebook > header.top tab button:hover { background: alpha(@danger, 0.85); color: white; }
 
 button.suggested-action {
     background-image: none;
@@ -97,12 +97,12 @@ treeview.view header button { padding: 6px 8px; font-weight: 600; }
 
 button.destructive-action {
     background-image: none;
-    background-color: alpha(@brand_red, 0.85);
-    border-color: shade(@brand_red, 0.7);
+    background-color: alpha(@danger, 0.85);
+    border-color: shade(@danger, 0.7);
     color: white;
     text-shadow: none;
 }
-button.destructive-action:hover { background-color: @brand_red; }
+button.destructive-action:hover { background-color: @danger; }
 .section-title { font-weight: 700; font-size: 1.05em; }
 .health-overall { margin-bottom: 2px; }
 paned > separator { min-height: 8px; background: none; }
