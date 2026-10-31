@@ -3,6 +3,7 @@
 # newest CHANGELOG.md section. Draft first, files attached, then published, so "latest"
 # never points at a release without its downloads.
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
