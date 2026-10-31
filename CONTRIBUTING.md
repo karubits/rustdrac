@@ -6,7 +6,7 @@ request makes it better.
 ## Reporting bugs and requesting features
 
 Open an [issue](https://github.com/karubits/rustdrac/issues). For bugs, please include:
-- the Rust Drac version (**☰ → About Rust Drac**, or `rustdrac --version`);
+- the Rust Drac version (**Menu → About Rust Drac**, or `rustdrac --version`);
 - the iDRAC generation and firmware version, and the server model;
 - your distro, and whether you use the AppImage or a source build;
 - what you did, what you expected and what happened. Output from `RUSTDRAC_DEBUG=1 rustdrac …`

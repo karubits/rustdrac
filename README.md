@@ -65,6 +65,8 @@ RUSTDRAC_PASSWORD='…' rustdrac 192.0.2.10  # password from the environment
 
 ## Connection manager
 
+![Connection manager with groups, tags and notes](docs/screenshots/manager.png)
+
 The first tab is an address book:
 - **Add / Edit / Duplicate / Delete** (buttons or right-click menu). Each server has a name, address, user, group, tags, service tag, model and free-form notes.
 - **Groups** are folders in the list. Tags are comma separated.
@@ -79,7 +81,7 @@ Each console opens in its own tab. To close one, use the tab's ✕ or the viewer
 ## Screenshots and log export
 
 The header bar has two actions for the server in the current tab:
-- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. To change the folder, open **☰ → Settings…** (or set `defaults.screenshot_dir`). A notice offers **Open Folder**.
+- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. To change the folder, open **Menu → Settings…** (or set `defaults.screenshot_dir`). A notice offers **Open Folder**.
 - **Export Logs** (console and Health tabs, and the address book's right-click menu) saves a zip for a support case or an audit:
 
   | File | Contents |
@@ -140,7 +142,7 @@ Passwords are **never written to the YAML file**. If you tick *Save password in 
 
 ## Settings and About
 
-The **☰** menu at the right of the header bar has:
+The menu button at the right of the header bar (☰ or ⋮, depending on your icon theme) has:
 - **Settings…**: choose the screenshot folder (type a path, **Browse…**, or ↶ for the default). It is saved as `defaults.screenshot_dir` in the config file.
 - **About Rust Drac**: the version, a link to the source code on GitHub, the licence, and how to contribute.
 
