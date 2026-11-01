@@ -1,7 +1,7 @@
 # cargo-deny policy (https://embarkstudios.github.io/cargo-deny/), run in CI.
 
 [graph]
-targets = ["x86_64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu"]
 all-features = true
 
 [advisories]

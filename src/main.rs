@@ -8,6 +8,7 @@ mod redfish;
 mod store;
 mod supermicro;
 mod theme;
+mod webview;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -21,7 +22,6 @@ use clap::Parser;
 use gtk::glib;
 use gtk::prelude::*;
 use reqwest::blocking::Client;
-use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
 
 use bmc::Vendor;
 use console::{ConsoleTab, Target};
@@ -68,6 +68,10 @@ fn main() {
         std::process::exit(1);
     }
     set_default_icon();
+    if let Err(e) = webview::init() {
+        // Consoles will show the error; the address book, health and export still work.
+        eprintln!("rustdrac: {e:#}");
+    }
     if let Err(e) = run(cli) {
         eprintln!("rustdrac: {e:#}");
         error_dialog(None, &format!("{e:#}"));
@@ -166,10 +170,12 @@ impl App {
             .show_border(false)
             .build();
         let toast = Toast::new();
-        let overlay = gtk::Overlay::new();
-        overlay.add(&notebook);
-        overlay.add_overlay(&toast.revealer);
-        window.add(&overlay);
+        // Not an overlay: on Windows the console is a native child window that would cover
+        // anything drawn over it.
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.pack_start(&notebook, true, true, 0);
+        content.pack_end(&toast.revealer, false, false, 0);
+        window.add(&content);
 
         let app = App(Rc::new(AppInner {
             window,
@@ -1085,20 +1091,15 @@ impl App {
             };
 
             let page = app.0.notebook.nth_page(app.0.notebook.current_page());
-            let view = page.and_then(|p| app.tab_for(&p)).and_then(|t| t.webview());
-            match view {
-                Some(view) => view.snapshot(
-                    SnapshotRegion::Visible,
-                    SnapshotOptions::NONE,
-                    None::<&gtk::gio::Cancellable>,
-                    move |res| {
-                        let saved = res
-                            .map_err(anyhow::Error::from)
-                            .and_then(|surface| save_png(surface, &path));
-                        report_snapshot(saved);
-                        window.close();
-                    },
-                ),
+            let tab = page
+                .and_then(|p| app.tab_for(&p))
+                .filter(|t| t.is_connected());
+            match tab {
+                Some(tab) => tab.snapshot_png(move |res| {
+                    let saved = res.and_then(|png| Ok(std::fs::write(&path, png)?));
+                    report_snapshot(saved);
+                    window.close();
+                }),
                 None => {
                     report_snapshot(render_window(&window).and_then(|s| save_png(s, &path)));
                     window.close();
