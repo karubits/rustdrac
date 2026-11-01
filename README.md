@@ -4,7 +4,7 @@
 
 # Rust Drac
 
-**A fast, native Linux app for Dell iDRAC 8 & iDRAC 9 servers. Made with Rust 🦀**
+**A fast, native Linux app for Dell iDRAC 8 & 9 and Supermicro X11 servers. Made with Rust 🦀**
 
 Virtual console in tabs · address book · health & SEL viewer · background alarms.<br>
 No browser, no Java, no login page, no certificate warnings.
@@ -19,6 +19,7 @@ No browser, no Java, no login page, no certificate warnings.
 [![GTK 3](https://img.shields.io/badge/GTK-3-4a86cf?logo=gnome&logoColor=white)](https://www.gtk.org/)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20x86--64-informational?logo=linux&logoColor=white)](#download)
 [![iDRAC 8 | 9](https://img.shields.io/badge/Dell%20iDRAC-8%20%7C%209-0076ce?logo=dell&logoColor=white)](#how-it-works)
+[![Supermicro X11](https://img.shields.io/badge/Supermicro-X11-1b5e20)](#supermicro-x11)
 
 [Download](#download) · [Features](#features) · [Usage](#usage) · [Build](#build-from-source) · [Contributing](#contributing)
 
@@ -30,11 +31,11 @@ No browser, no Java, no login page, no certificate warnings.
 
 | | |
 |---|---|
-| 🖥️ **Virtual console in tabs** | Dell's HTML5 KVM viewer for iDRAC 8 and 9, opened straight from the app with no login page or certificate prompt. Several servers side by side. |
-| 📒 **Address book** | Groups, tags, notes, and instant search across every field. Service tag and model fill themselves in from Redfish. |
+| 🖥️ **Virtual console in tabs** | The HTML5 KVM viewer of Dell iDRAC 8 and 9 and of Supermicro X11 BMCs, opened straight from the app with no login page or certificate prompt. Several servers side by side. |
+| 📒 **Address book** | Groups, tags, notes, and instant search across every field. Vendor, service tag (or serial number) and model fill themselves in from Redfish. |
 | ❤️ **Health & SEL** | Every component and sensor, plus the full System Event Log with filtering, search, CSV export and clearing. |
 | 🔔 **Alarm checker** | Polls your servers in the background and sends a desktop notification when one turns Warning or Critical. |
-| 📸 **Screenshots & log export** | One-click PNG of the console, and a zip with a hardware summary, health, SEL and Lifecycle log for support cases. |
+| 📸 **Screenshots & log export** | One-click PNG of the console, and a zip with a hardware summary, health, SEL and the BMC's own log for support cases. |
 | 🔐 **Keyring passwords** | Passwords go to GNOME Keyring or KWallet, never into the config file. |
 | 🌗 **Dark by default** | A polished dark theme with an orange accent, or follow your desktop theme. |
 | 📦 **One-file download** | A self-contained AppImage that runs on any recent x86-64 Linux. |
@@ -56,7 +57,7 @@ The AppImage bundles GTK 3 and WebKitGTK and runs on x86-64 Linux with glibc 2.3
 
 ```sh
 rustdrac                                   # connection manager
-rustdrac lab-r630                          # saved connection (name, address or service tag)
+rustdrac lab-r630                          # saved connection (name, address or service tag / serial)
 rustdrac 192.0.2.10 -u admin -p '…'        # ad-hoc
 rustdrac lab-r630 build-01                 # several tabs at once
 rustdrac --health lab-r630                 # Health & SEL instead of the console
@@ -68,36 +69,37 @@ RUSTDRAC_PASSWORD='…' rustdrac 192.0.2.10  # password from the environment
 ![Connection manager with groups, tags and notes](docs/screenshots/manager.png)
 
 The first tab is an address book:
-- **Add / Edit / Duplicate / Delete** (buttons or right-click menu). Each server has a name, address, user, group, tags, service tag, model and free-form notes.
+- **Add / Edit / Duplicate / Delete** (buttons or right-click menu). Each server has a name, address, BMC type (detected on connect, or Dell / Supermicro by hand), user, group, tags, service tag or serial, model and free-form notes.
 - **Groups** are folders in the list. Tags are comma separated.
-- **Search** matches every whitespace-separated term against name, address, user, group, tags, service tag, model and notes. Press Enter to connect to the first match. Typing anywhere in the list jumps to the search box.
-- **Service tag and model** are filled in automatically from Redfish the first time you connect.
+- **Search** matches every whitespace-separated term against name, address, user, group, tags, service tag / serial, model and notes. Press Enter to connect to the first match. Typing anywhere in the list jumps to the search box.
+- **Vendor, service tag (Supermicro: serial number) and model** are filled in automatically from Redfish the first time you connect.
 - **Quick Connect** opens a one-off console, which you can optionally add to the address book.
 
-Each console opens in its own tab. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button. Either way the app first disconnects the KVM the way Dell's button does, then logs out. Without this the iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
+Each console opens in its own tab. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button (iDRAC) or exit hotkey (Supermicro). Either way the app first disconnects the KVM the way the viewer's own button does, then logs out. Without this an iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
 
 ![Virtual console in a tab](docs/screenshots/console.png)
 
 ## Screenshots and log export
 
 The header bar has two actions for the server in the current tab:
-- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without Dell's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. To change the folder, open **Menu → Settings…** (or set `defaults.screenshot_dir`). A notice offers **Open Folder**.
+- **Screenshot** (console tabs) saves the console picture as a PNG at its native resolution, without the viewer's toolbar, to `~/Pictures/Rust Drac/<name>-<service tag>-<time>.png`. To change the folder, open **Menu → Settings…** (or set `defaults.screenshot_dir`). A notice offers **Open Folder**.
 - **Export Logs** (console and Health tabs, and the address book's right-click menu) saves a zip for a support case or an audit:
 
   | File | Contents |
   |---|---|
-  | `summary.txt` / `summary.json` | Model, service tag, serial, BIOS and iDRAC firmware, power state, health and alarms, CPUs, DIMMs (slot, size, speed, part number), storage controllers and drives (model, size, serial), NICs (MAC, link, speed) and PSUs |
+  | `summary.txt` / `summary.json` | Vendor, model, service tag, serial, BIOS and BMC firmware, power state, health and alarms, CPUs, DIMMs (slot, size, speed, part number), storage controllers and drives (model, size, serial), NICs (MAC, link, speed) and PSUs |
   | `health.csv` | Every component and sensor with its status and reading |
   | `sel.csv` | The full System Event Log |
-  | `lclog.csv` | The newest 500 Lifecycle Controller log entries |
+  | `lclog.csv` | Dell: the newest 500 Lifecycle Controller log entries |
+  | `maintenance.csv` | Supermicro: the newest 500 maintenance event log entries (who changed what, over which interface) |
 
-  It is read over Redfish, with progress and Cancel, and contains no credentials. Expect a few seconds on iDRAC 9 and two to three minutes on iDRAC 8.
+  It is read over Redfish, with progress and Cancel, and contains no credentials. Expect a few seconds on iDRAC 9, about a minute on a Supermicro X11 and two to three minutes on iDRAC 8.
 
 ## Health, SEL and alarms
 
 ![Health & SEL](docs/screenshots/health.png)
 
-All of this uses Redfish with basic auth, so it doesn't take one of the iDRAC's few web-session slots and doesn't disturb an open console.
+All of this uses Redfish with basic auth, so it doesn't take one of the BMC's few web-session slots and doesn't disturb an open console.
 
 - **Health & SEL tab** (toolbar, right-click menu or `--health`). It shows:
   - the overall state;
@@ -111,7 +113,7 @@ All of this uses Redfish with basic auth, so it doesn't take one of the iDRAC's 
   - A desktop notification is shown when a server becomes Warning or Critical.
   - Group rows show the worst state of their servers.
 
-iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake (iDRAC 9 answers in well under a second). Rust Drac keeps one connection per iDRAC, sends its requests one at a time (concurrent requests get garbage back), retries transient failures, and fills the Health tab in as results arrive. A full read of an R630 takes about a minute.
+iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake (iDRAC 9 answers in well under a second, a Supermicro X11 in about two). Rust Drac keeps one connection per BMC, sends its requests one at a time (concurrent requests get garbage back), retries transient failures, and fills the Health tab in as results arrive. A full read of an R630 takes about a minute.
 
 ### Config file
 
@@ -131,10 +133,15 @@ connections:
     tags: [r630, pxe]
     service_tag: ABC1234
     model: PowerEdge R630
+    vendor: dell           # dell or supermicro; learned on first connect, or set by hand
     notes: PXE test bench, rack 3 U12
     save_password: true
   - address: 192.0.2.20  # only the address is required
+    user: ADMIN
+    vendor: supermicro
 ```
+
+On Supermicro servers `service_tag` holds the system serial number.
 
 ### Passwords
 
@@ -152,7 +159,7 @@ Dark mode is the default: Adwaita dark plus the app's own stylesheet with an ora
 
 ## How it works
 
-The app first checks which web UI the iDRAC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9), so you never pick the generation yourself.
+The app first checks which web UI the BMC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9) or what it serves there (a Supermicro BMC answers with its login form, which posts to `/cgi/login.cgi`), so you never pick the vendor or generation yourself. The result is saved as `vendor:` in the address book, and the Redfish paths follow from it (`Systems/System.Embedded.1` and `Managers/iDRAC.Embedded.1` on Dell, `Systems/1` and `Managers/1` on Supermicro).
 
 ### iDRAC 8
 
@@ -171,6 +178,14 @@ Note: the iDRAC 8 only serves gzip-compressed static files, so a client that doe
 2. **Console session.** `GET /sysmgmt/2015/server/vconsole` returns the viewer URL (`/restgui/vconsole/index.html`) with the KVM session ids `VCSID`/`VCSID2` in its query.
 3. **Viewer.** Dell's web UI opens the bare viewer page and passes the ids through `sessionStorage`. An injected script does the same, so the ids never appear in the URL. The viewer is noVNC over a `wss://` WebSocket on port 443.
 4. **Closing.** The page is unloaded, which closes the KVM socket, and the session is deleted (`DELETE /sysmgmt/2015/bmc/session`).
+
+### Supermicro X11
+
+1. **Login.** `POST /cgi/login.cgi` with the user and password base64-encoded (as the login page's own script does on recent firmware; older X10/X11 firmware posts them plain, and the app checks the login page to tell), which sets the `SID` cookie.
+2. **Viewer.** `/cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap` is the HTML5 iKVM (noVNC): a self-contained page the web UI opens in a popup, carrying a one-time KVM token and opening a `wss://` WebSocket on port 443. It opens in an embedded WebKitGTK view with the session cookie. If the session is gone, the BMC serves a "session timed out" stub instead; a small injected script makes that readable rather than bouncing to the login form.
+3. **Closing.** The page is unloaded, which closes the KVM socket, then `GET /cgi/logout.cgi` ends the web session.
+
+Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query string is answered with a redirect and then HTTP 501, so the app reads collections member by member there. The SEL is `Systems/1/LogServices/Log1`; the maintenance event log (`Managers/1/LogServices/Log1`) takes the place of Dell's Lifecycle log in the export.
 
 ## Build from source
 
@@ -242,20 +257,20 @@ Versions follow [SemVer](https://semver.org/): patch for fixes, minor for new fe
 | `RUSTDRAC_SNAPSHOT_PAGE=<n>` | With SNAPSHOT, switches to tab n first (0 = Connections) |
 | `RUSTDRAC_TEST_SCREENSHOT=<secs>` | Presses the Screenshot button after N seconds |
 
-To test the log export against a real iDRAC (it writes `rustdrac-export-test.zip` to the temp folder):
+To test the log export against a real BMC (it writes `rustdrac-export-test.zip` to the temp folder; `RUSTDRAC_TEST_VENDOR=dell|supermicro` skips the vendor probe):
 
 ```sh
-RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored export_from_a_real_idrac --nocapture
+RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored export_from_a_real_bmc --nocapture
 ```
 
 ## Contributing
 
 Contributions are very welcome, from bug reports to pull requests! 🙌
 
-- 🐛 **Found a bug or have an idea?** [Open an issue](https://github.com/karubits/rustdrac/issues). Include your iDRAC version, server model and what you expected.
+- 🐛 **Found a bug or have an idea?** [Open an issue](https://github.com/karubits/rustdrac/issues). Include your BMC (iDRAC 8/9 or Supermicro X11) and firmware version, server model and what you expected.
 - 🔧 **Want to fix something?** Fork the repo, make your change on a branch, and [open a pull request](https://github.com/karubits/rustdrac/pulls).
 - ✅ Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before you push (see [Development](#development)).
-- ⭐ **Like it?** Star the repo so other iDRAC wranglers can find it.
+- ⭐ **Like it?** Star the repo so other BMC wranglers can find it.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the details.
 
@@ -263,4 +278,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the details.
 
 [MIT](LICENSE) © Karubits
 
-<div align="center"><sub>Made with Rust 🦀, GTK and WebKitGTK. Not affiliated with Dell Technologies; iDRAC and PowerEdge are trademarks of Dell Inc.</sub></div>
+<div align="center"><sub>Made with Rust 🦀, GTK and WebKitGTK. Not affiliated with Dell Technologies or Super Micro Computer, Inc.; iDRAC and PowerEdge are trademarks of Dell Inc., Supermicro of Super Micro Computer, Inc.</sub></div>

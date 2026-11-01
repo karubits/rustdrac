@@ -1,4 +1,4 @@
-//! One iDRAC virtual console, shown as a notebook tab.
+//! One BMC virtual console, shown as a notebook tab.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -15,7 +15,7 @@ use webkit2gtk::{
     WebsiteDataManager, WebsiteDataManagerExt,
 };
 
-use crate::idrac;
+use crate::bmc;
 
 const LANG: &str = "en";
 
@@ -34,7 +34,7 @@ pub struct Target {
     pub connection_id: Option<String>,
 }
 
-type IdentityHook = Box<dyn Fn(&Target, &idrac::Identity)>;
+type IdentityHook = Box<dyn Fn(&Target, &bmc::Identity)>;
 type PageHook = Box<dyn Fn(&gtk::Widget)>;
 type TitleHook = Box<dyn Fn(&gtk::Widget, &str)>;
 
@@ -50,7 +50,7 @@ pub struct Hooks {
 enum State {
     Connecting,
     Connected {
-        session: idrac::Session,
+        session: bmc::Session,
         disconnect_js: Option<&'static str>,
     },
     Failed,
@@ -119,9 +119,9 @@ const CANVAS_PNG_JS: &str = r#"(function () {
 })()"#;
 
 struct Connected {
-    session: idrac::Session,
-    identity: Option<idrac::Identity>,
-    page: idrac::ConsolePage,
+    session: bmc::Session,
+    identity: Option<bmc::Identity>,
+    page: bmc::ConsolePage,
 }
 
 impl ConsoleTab {
@@ -377,8 +377,8 @@ impl ConsoleTab {
     ///
     /// On iDRAC 8, just dropping the KVM WebSocket leaves a stale console session ("A session
     /// to this device already exists"), so disconnect the way the viewer's "Disconnect Viewer"
-    /// button does. iDRAC 9's viewer has no global hook; unloading the page closes its socket.
-    /// Either way, give it a moment to reach the iDRAC, then log out.
+    /// button does. The iDRAC 9 and Supermicro viewers have no global hook; unloading the page
+    /// closes their socket. Either way, give it a moment to reach the BMC, then log out.
     pub fn close(&self) {
         let state = std::mem::replace(&mut *self.0.state.borrow_mut(), State::Closing);
         match state {
@@ -420,9 +420,9 @@ impl ConsoleTab {
         }
     }
 
-    fn logout_and_finish(&self, session: idrac::Session) {
+    fn logout_and_finish(&self, session: bmc::Session) {
         let client = self.0.client.clone();
-        let job = gtk::gio::spawn_blocking(move || idrac::logout(&client, &session));
+        let job = gtk::gio::spawn_blocking(move || bmc::logout(&client, &session));
         let weak = self.downgrade();
         glib::MainContext::default().spawn_local(async move {
             if let Ok(Err(e)) = job.await {
@@ -444,8 +444,8 @@ impl ConsoleTab {
         (self.0.hooks.on_closed)(&self.widget());
     }
 
-    fn build_webview(&self, session: &idrac::Session, page: &idrac::ConsolePage) -> WebView {
-        // Ephemeral per tab: separate cookies per iDRAC session, nothing written to disk.
+    fn build_webview(&self, session: &bmc::Session, page: &bmc::ConsolePage) -> WebView {
+        // Ephemeral per tab: separate cookies per BMC session, nothing written to disk.
         let data = WebsiteDataManager::new_ephemeral();
         data.set_tls_errors_policy(TLSErrorsPolicy::Ignore);
         let context = WebContext::with_website_data_manager(&data);
@@ -496,7 +496,7 @@ impl ConsoleTab {
             Some(popup.upcast())
         });
 
-        // The iDRAC web server occasionally drops connections; retry the console page a few times.
+        // BMC web servers occasionally drop connections; retry the console page a few times.
         let retries = Cell::new(0);
         webview.connect_load_failed(move |view, _, uri, err| {
             if retries.get() >= MAX_LOAD_RETRIES || uri.is_empty() {
@@ -517,27 +517,29 @@ impl ConsoleTab {
             }
         });
 
+        // Load the page once every session cookie is in place.
         let console_url = page.url.clone();
-        let mut cookie = soup::Cookie::new(
-            idrac::SESSION_COOKIE,
-            &session.cookie,
-            &session.host,
-            "/",
-            -1,
-        );
-        cookie.set_secure(true);
-        cookie.set_http_only(true);
         let view = webview.clone();
         match data.cookie_manager() {
-            Some(cookies) => {
-                cookies.add_cookie(&mut cookie, None::<&gtk::gio::Cancellable>, move |res| {
-                    if let Err(e) = res {
-                        eprintln!("rustdrac: setting session cookie: {e}");
-                    }
-                    view.load_uri(&console_url);
-                })
+            Some(manager) if !page.cookies.is_empty() => {
+                let pending = Rc::new(Cell::new(page.cookies.len()));
+                for c in &page.cookies {
+                    let mut cookie = soup::Cookie::new(&c.name, &c.value, session.host(), "/", -1);
+                    cookie.set_secure(true);
+                    cookie.set_http_only(c.http_only);
+                    let (view, url, pending) = (view.clone(), console_url.clone(), pending.clone());
+                    manager.add_cookie(&mut cookie, None::<&gtk::gio::Cancellable>, move |res| {
+                        if let Err(e) = res {
+                            eprintln!("rustdrac: setting session cookie: {e}");
+                        }
+                        pending.set(pending.get() - 1);
+                        if pending.get() == 0 {
+                            view.load_uri(&url);
+                        }
+                    });
+                }
             }
-            None => view.load_uri(&console_url),
+            _ => view.load_uri(&console_url),
         }
         webview
     }
@@ -579,20 +581,26 @@ fn centered_box() -> gtk::Box {
 }
 
 fn connect_blocking(client: &Client, target: &Target) -> Result<Connected> {
-    let session = idrac::login(client, &target.host, &target.user, &target.password)?;
-    let identity = idrac::identity(client, &target.host, &target.user, &target.password);
+    let session = bmc::login(client, &target.host, &target.user, &target.password)?;
+    let identity = bmc::identity(
+        client,
+        &target.host,
+        &target.user,
+        &target.password,
+        session.vendor(),
+    );
     let title = identity
         .as_ref()
         .and_then(|i| i.title())
         .unwrap_or_else(|| target.host.clone());
-    match idrac::console_page(client, &session, &title, LANG) {
+    match bmc::console_page(client, &session, &title, LANG) {
         Ok(page) => Ok(Connected {
             session,
             identity,
             page,
         }),
         Err(e) => {
-            let _ = idrac::logout(client, &session);
+            let _ = bmc::logout(client, &session);
             Err(e)
         }
     }

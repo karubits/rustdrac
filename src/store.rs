@@ -13,8 +13,9 @@
 //!     user: admin
 //!     group: Lab
 //!     tags: [r630, pxe]
-//!     service_tag: ABC1234
+//!     service_tag: ABC1234     # or the serial number on other vendors
 //!     model: PowerEdge R630
+//!     vendor: dell             # dell or supermicro; learned on first connect, or set by hand
 //!     notes: Rack 3, U12
 //!     save_password: true
 //! ```
@@ -28,6 +29,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::bmc::Vendor;
 
 const KEYRING_SERVICE: &str = "rustdrac";
 /// The project used to be called idrac-console; its config and saved passwords are migrated.
@@ -74,6 +77,9 @@ pub struct Connection {
     pub service_tag: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// Learned on first connect (or set by hand); `None` means detect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<Vendor>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -325,6 +331,18 @@ impl Store {
     pub fn default_user(&self) -> String {
         self.defaults.user.clone().unwrap_or_else(|| "root".into())
     }
+
+    /// The user to log in as: the connection's own, else `defaults.user`, else the vendor's
+    /// factory account (`root` when the vendor is not known yet).
+    pub fn user_for(&self, conn: &Connection) -> String {
+        if !conn.user.is_empty() {
+            conn.user.clone()
+        } else if let Some(user) = &self.defaults.user {
+            user.clone()
+        } else {
+            conn.vendor.unwrap_or_default().default_user().to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +359,7 @@ mod tests {
             tags: vec!["pxe".into(), "Rack3".into()],
             service_tag: "ABC1234".into(),
             model: "PowerEdge R630".into(),
+            vendor: Some(Vendor::Dell),
             notes: "Spare PSU missing".into(),
             save_password: true,
         }
@@ -391,14 +410,19 @@ mod tests {
 
         std::fs::write(
             &path,
-            "connections:\n  - address: 10.0.0.1\n  - address: 10.0.0.2\n",
+            "connections:\n  - address: 10.0.0.1\n  - address: 10.0.0.2\n    vendor: supermicro\n",
         )
         .unwrap();
         let loaded = Store::load_from(&path).unwrap();
         assert_eq!(loaded.connections.len(), 2);
         assert_ne!(loaded.connections[0].id, loaded.connections[1].id);
         assert_eq!(loaded.connections[0].display_name(), "10.0.0.1");
+        assert_eq!(loaded.connections[0].vendor, None);
+        assert_eq!(loaded.connections[1].vendor, Some(Vendor::Supermicro));
         assert_eq!(loaded.find("10.0.0.2").unwrap().address, "10.0.0.2");
+        assert_eq!(loaded.user_for(&loaded.connections[0]), "root");
+        assert_eq!(loaded.user_for(&loaded.connections[1]), "ADMIN");
+        assert_eq!(store.user_for(&loaded.connections[1]), "admin");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

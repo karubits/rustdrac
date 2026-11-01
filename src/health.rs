@@ -8,6 +8,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use reqwest::blocking::Client;
 
+use crate::bmc::Vendor;
 use crate::redfish::{self, Health, HealthReport, Redfish, SelEntry, Step};
 use crate::theme::health_markup;
 
@@ -19,6 +20,8 @@ pub struct Target {
     pub user: String,
     pub password: String,
     pub connection_id: Option<String>,
+    /// The saved vendor, if known; otherwise it is detected.
+    pub vendor: Option<Vendor>,
 }
 
 type ReportHook = Box<dyn Fn(&Target, &Result<HealthReport, String>)>;
@@ -92,7 +95,7 @@ impl HealthTab {
         let clear = icon_button(
             "Clear SEL…",
             "edit-clear-all-symbolic",
-            "Delete every SEL entry on the iDRAC",
+            "Delete every SEL entry on the BMC",
         );
         clear.style_context().add_class("destructive-action");
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -288,7 +291,7 @@ impl HealthTab {
         self.busy(2);
 
         let t = &self.0.target;
-        let rf = Redfish::new(&self.0.client, &t.host, &t.user, &t.password);
+        let rf = Redfish::new(&self.0.client, &t.host, &t.user, &t.password).with_vendor(t.vendor);
 
         // The SEL in parallel (its own connection), health step by step on another, showing
         // each part as it arrives: an iDRAC 8 takes several seconds per Redfish request.
@@ -543,7 +546,7 @@ impl HealthTab {
             &format!("Clear the System Event Log on {}?", self.0.target.name),
         );
         dialog.set_secondary_text(Some(
-            "Every SEL entry on the iDRAC is deleted. This cannot be undone — export it first if you need a record.",
+            "Every SEL entry on the BMC is deleted. This cannot be undone — export it first if you need a record.",
         ));
         dialog.add_buttons(&[
             ("Cancel", gtk::ResponseType::Cancel),
@@ -559,7 +562,9 @@ impl HealthTab {
         let target = self.0.target.clone();
         let client = self.0.client.clone();
         let job = gtk::gio::spawn_blocking(move || {
-            Redfish::new(&client, &target.host, &target.user, &target.password).clear_sel()
+            Redfish::new(&client, &target.host, &target.user, &target.password)
+                .with_vendor(target.vendor)
+                .clear_sel()
         });
         let t = self.downgrade();
         glib::MainContext::default().spawn_local(async move {
@@ -596,6 +601,8 @@ fn pretty_time(s: &str) -> String {
         Some((date, rest)) => {
             let split = rest.find(['+', '-', 'Z']).unwrap_or(rest.len());
             let (time, zone) = rest.split_at(split);
+            // Supermicro stamps entries in UTC with a bare "Z".
+            let zone = if zone == "Z" { "UTC" } else { zone };
             format!("{date} {time} {zone}").trim_end().to_string()
         }
         None => s.to_string(),
@@ -667,7 +674,7 @@ mod tests {
         );
         assert_eq!(
             super::pretty_time("2026-10-30T02:03:59Z"),
-            "2026-10-30 02:03:59 Z"
+            "2026-10-30 02:03:59 UTC"
         );
         assert_eq!(
             super::pretty_time("2026-10-30T02:03:59"),

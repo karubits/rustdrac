@@ -1,4 +1,4 @@
-//! The "Connections" tab: a searchable, grouped address book of iDRACs.
+//! The "Connections" tab: a searchable, grouped address book of BMCs.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -7,6 +7,7 @@ use std::rc::Rc;
 use gtk::glib;
 use gtk::prelude::*;
 
+use crate::bmc::Vendor;
 use crate::redfish::{Health, HealthReport};
 use crate::store::{self, Connection, Store};
 use crate::theme::{dot_markup, health_color, health_markup};
@@ -96,7 +97,9 @@ pub struct Manager(Rc<Inner>);
 impl Manager {
     pub fn new(store: Rc<RefCell<Store>>, hooks: Hooks) -> Manager {
         let search = gtk::SearchEntry::builder()
-            .placeholder_text("Search name, address, group, tag, service tag, model, notes…")
+            .placeholder_text(
+                "Search name, address, group, tag, service tag / serial, model, notes…",
+            )
             .hexpand(true)
             .build();
         let button = |label: &str, icon: &str, tip: &str| {
@@ -182,7 +185,7 @@ impl Manager {
             ("Address", COL_ADDRESS, 190),
             ("User", COL_USER, 110),
             ("Tags", COL_TAGS, 170),
-            ("Service Tag", COL_SERVICE_TAG, 110),
+            ("Service Tag / Serial", COL_SERVICE_TAG, 130),
             ("Model", COL_MODEL, 170),
             ("Notes", COL_NOTES, 0),
         ] {
@@ -457,7 +460,7 @@ impl Manager {
             } else {
                 (
                     "No matches",
-                    "Nothing matches the search. Names, addresses, groups, tags, service tags, models and notes are searched.",
+                    "Nothing matches the search. Names, addresses, groups, tags, service tags / serials, models and notes are searched.",
                 )
             };
             self.0.empty_title.set_text(title);
@@ -734,8 +737,17 @@ fn edit_dialog(
     };
 
     let name = entry(&conn.name, "defaults to the address");
-    let address = entry(&conn.address, "hostname or IP of the iDRAC");
-    let user = entry(&conn.user, "root");
+    let address = entry(
+        &conn.address,
+        "hostname or IP of the BMC (iDRAC or Supermicro)",
+    );
+    let vendor = gtk::ComboBoxText::new();
+    vendor.append(Some("auto"), "Detect on connect");
+    for v in Vendor::ALL {
+        vendor.append(Some(v.id()), v.label());
+    }
+    vendor.set_active_id(Some(conn.vendor.map(Vendor::id).unwrap_or("auto")));
+    let user = entry(&conn.user, "root (Dell) or ADMIN (Supermicro)");
     let password = entry(
         "",
         if conn.save_password {
@@ -778,12 +790,13 @@ fn edit_dialog(
 
     attach("Name", name.upcast_ref());
     attach("Address", address.upcast_ref());
+    attach("BMC type", vendor.upcast_ref());
     attach("User", user.upcast_ref());
     attach("Password", password.upcast_ref());
     attach("", save_password.upcast_ref());
     attach("Group", group.upcast_ref());
     attach("Tags", tags.upcast_ref());
-    attach("Service Tag", service_tag.upcast_ref());
+    attach("Service Tag / Serial", service_tag.upcast_ref());
     attach("Model", model.upcast_ref());
     attach("Notes", notes_scroll.upcast_ref());
     dialog.content_area().add(&grid);
@@ -829,6 +842,7 @@ fn edit_dialog(
                 .collect(),
             service_tag: service_tag.text().trim().to_string(),
             model: model.text().trim().to_string(),
+            vendor: vendor.active_id().as_deref().and_then(Vendor::parse),
             notes: buffer
                 .text(&start, &end, false)
                 .map(|t| t.trim_end().to_string())

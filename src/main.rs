@@ -1,3 +1,4 @@
+mod bmc;
 mod console;
 mod export;
 mod health;
@@ -5,6 +6,7 @@ mod idrac;
 mod manager;
 mod redfish;
 mod store;
+mod supermicro;
 mod theme;
 
 use std::cell::{Cell, RefCell};
@@ -21,6 +23,7 @@ use gtk::prelude::*;
 use reqwest::blocking::Client;
 use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
 
+use bmc::Vendor;
 use console::{ConsoleTab, Target};
 use health::HealthTab;
 use manager::Check;
@@ -31,19 +34,19 @@ use store::{Connection, Store};
 const APP_TITLE: &str = "Rust Drac";
 const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
-/// Dell iDRAC 8/9 HTML5 virtual console, without a browser.
+/// Dell iDRAC 8/9 and Supermicro X11 HTML5 virtual console, without a browser.
 ///
 /// With no arguments the connection manager opens. Each HOST opens a console tab; a HOST can
-/// be an address, or the name, address or service tag of a saved connection.
+/// be an address, or the name, address or service tag / serial of a saved connection.
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Cli {
-    /// iDRAC hostnames/IPs or saved connection names to open right away.
+    /// BMC hostnames/IPs or saved connection names to open right away.
     hosts: Vec<String>,
-    /// iDRAC user (overrides the saved connection)
+    /// BMC user (overrides the saved connection)
     #[arg(short, long)]
     user: Option<String>,
-    /// iDRAC password (overrides the saved one)
+    /// BMC password (overrides the saved one)
     #[arg(short, long, env = "RUSTDRAC_PASSWORD", hide_env_values = true)]
     password: Option<String>,
     /// Open the Health & SEL view for each HOST instead of its console
@@ -82,7 +85,7 @@ fn run(cli: Cli) -> Result<()> {
         parsed
     });
     theme::apply(cli.theme.or(configured).unwrap_or(theme::Theme::Dark));
-    let app = App::new(store, idrac::http_client()?);
+    let app = App::new(store, bmc::http_client()?);
     for host in &cli.hosts {
         app.open_from_cli(
             host,
@@ -139,7 +142,7 @@ impl App {
         let export_button = header_button(
             "Export Logs",
             "document-save-symbolic",
-            "Save a zip with a hardware summary, health, the SEL and the Lifecycle log",
+            "Save a zip with a hardware summary, health, the SEL and the BMC log",
         );
         let settings_item = gtk::MenuItem::with_label("Settings…");
         let about_item = gtk::MenuItem::with_label("About Rust Drac");
@@ -440,7 +443,7 @@ impl App {
             .program_name(APP_TITLE)
             .version(env!("CARGO_PKG_VERSION"))
             .comments(
-                "A native app for Dell iDRAC 8 and iDRAC 9 servers: the HTML5 virtual console \
+                "A native app for Dell iDRAC 8/9 and Supermicro X11 servers: the HTML5 virtual console \
                  in tabs, an address book, a health and System Event Log viewer and a \
                  background alarm checker.\n\n\
                  Made with Rust 🦀, GTK 3 and WebKitGTK.\n\n\
@@ -476,7 +479,14 @@ impl App {
         };
         if let Some(tab) = self.tab_for(&page) {
             let t = tab.target();
-            let server = export_server(&t.name, &t.host, &t.user, &t.password, &tab.service_tag());
+            let server = ExportServer {
+                name: t.name.clone(),
+                host: t.host.clone(),
+                user: t.user.clone(),
+                password: t.password.clone(),
+                service_tag: tab.service_tag(),
+                vendor: bmc::cached_vendor(&t.host),
+            };
             self.export_logs(server);
         } else if let Some(tab) = self.health_for(&page) {
             let t = tab.target();
@@ -485,7 +495,14 @@ impl App {
                 .as_ref()
                 .and_then(|id| self.0.store.borrow().get(id).map(|c| c.service_tag.clone()))
                 .unwrap_or_default();
-            self.export_logs(export_server(&t.name, &t.host, &t.user, &t.password, &tag));
+            self.export_logs(ExportServer {
+                name: t.name.clone(),
+                host: t.host.clone(),
+                user: t.user.clone(),
+                password: t.password.clone(),
+                service_tag: tag,
+                vendor: t.vendor.or_else(|| bmc::cached_vendor(&t.host)),
+            });
         }
     }
 
@@ -493,13 +510,14 @@ impl App {
         let Some((user, password)) = self.credentials(conn.clone(), None, None) else {
             return;
         };
-        self.export_logs(export_server(
-            conn.display_name(),
-            &conn.address,
-            &user,
-            &password,
-            &conn.service_tag,
-        ));
+        self.export_logs(ExportServer {
+            name: conn.display_name().to_string(),
+            host: conn.address.clone(),
+            user,
+            password,
+            service_tag: conn.service_tag.clone(),
+            vendor: conn.vendor,
+        });
     }
 
     /// Ask where to save, then read everything in the background behind a progress dialog.
@@ -572,7 +590,8 @@ impl App {
         let client = self.0.client.clone();
         let out = path.clone();
         let job = gtk::gio::spawn_blocking(move || -> Result<()> {
-            let rf = Redfish::new(&client, &server.host, &server.user, &server.password);
+            let rf = Redfish::new(&client, &server.host, &server.user, &server.password)
+                .with_vendor(server.vendor);
             let collected = export::collect(
                 &rf,
                 &|step| {
@@ -689,11 +708,7 @@ impl App {
     }
 
     fn user_for(&self, conn: &Connection) -> String {
-        if conn.user.is_empty() {
-            self.0.store.borrow().default_user()
-        } else {
-            conn.user.clone()
-        }
+        self.0.store.borrow().user_for(conn)
     }
 
     /// User and password for a saved connection: given, saved, or asked for (and optionally
@@ -767,6 +782,7 @@ impl App {
                 user,
                 password,
                 connection_id: Some(conn.id.clone()),
+                vendor: conn.vendor,
             },
             self.0.client.clone(),
             health::Hooks {
@@ -817,8 +833,11 @@ impl App {
             self.0.checks_running.set(self.0.checks_running.get() + 1);
             let client = self.0.client.clone();
             let host = conn.address.clone();
+            let vendor = conn.vendor;
             let job = gtk::gio::spawn_blocking(move || {
-                Redfish::new(&client, &host, &user, &password).check()
+                Redfish::new(&client, &host, &user, &password)
+                    .with_vendor(vendor)
+                    .check()
             });
             let weak = self.downgrade();
             glib::MainContext::default().spawn_local(async move {
@@ -835,6 +854,13 @@ impl App {
     }
 
     fn check_done(&self, conn: &Connection, result: Result<redfish::HealthReport>) {
+        // The check probed the vendor if it was not saved yet; keep it so it never has to.
+        if conn.vendor.is_none()
+            && result.is_ok()
+            && let Some(vendor) = bmc::cached_vendor(&conn.address)
+        {
+            self.learn_vendor(&conn.id, vendor);
+        }
         let check = match result {
             Ok(report) => Check::Done(report),
             Err(e) => Check::Failed(format!("{e:#}")),
@@ -966,8 +992,9 @@ impl App {
         }
     }
 
-    /// Fill in the service tag / model of a saved connection from what Redfish reported.
-    fn learn_identity(&self, target: &Target, identity: &idrac::Identity) {
+    /// Fill in the vendor, service tag / serial and model of a saved connection from what
+    /// the first connect found out.
+    fn learn_identity(&self, target: &Target, identity: &bmc::Identity) {
         let Some(id) = &target.connection_id else {
             return;
         };
@@ -985,6 +1012,10 @@ impl App {
                 changed = true;
             }
         }
+        if conn.vendor != Some(identity.vendor) {
+            conn.vendor = Some(identity.vendor);
+            changed = true;
+        }
         if !changed {
             return;
         }
@@ -994,6 +1025,21 @@ impl App {
             eprintln!("rustdrac: {e:#}");
         }
         self.manager().refresh();
+    }
+
+    /// Remember a detected vendor so later checks skip the probe.
+    fn learn_vendor(&self, id: &str, vendor: Vendor) {
+        let mut store = self.0.store.borrow_mut();
+        let Some(conn) = store.get_mut(id) else {
+            return;
+        };
+        if conn.vendor == Some(vendor) {
+            return;
+        }
+        conn.vendor = Some(vendor);
+        if let Err(e) = store.save() {
+            eprintln!("rustdrac: {e:#}");
+        }
     }
 
     /// `RUSTDRAC_AUTOCLOSE=<secs>` closes the window after N seconds (disconnecting every
@@ -1099,16 +1145,7 @@ struct ExportServer {
     user: String,
     password: String,
     service_tag: String,
-}
-
-fn export_server(name: &str, host: &str, user: &str, password: &str, tag: &str) -> ExportServer {
-    ExportServer {
-        name: name.to_string(),
-        host: host.to_string(),
-        user: user.to_string(),
-        password: password.to_string(),
-        service_tag: tag.to_string(),
-    }
+    vendor: Option<Vendor>,
 }
 
 fn header_button(label: &str, icon: &str, tip: &str) -> gtk::Button {
@@ -1378,7 +1415,7 @@ fn quick_connect_dialog(parent: &gtk::Window, host: &str, user: &str) -> Option<
     let grid = form_grid();
     let host_entry = gtk::Entry::builder()
         .text(host)
-        .placeholder_text("hostname or IP of the iDRAC")
+        .placeholder_text("hostname or IP of the BMC")
         .activates_default(true)
         .build();
     let user_entry = gtk::Entry::builder()
