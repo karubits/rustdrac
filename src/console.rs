@@ -1,6 +1,6 @@
 //! One BMC virtual console, shown as a notebook tab.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -8,19 +8,13 @@ use anyhow::Result;
 use gtk::glib;
 use gtk::prelude::*;
 use reqwest::blocking::Client;
-use webkit2gtk::{
-    CookieManagerExt, SettingsExt, TLSErrorsPolicy, URIRequestExt, URIResponseExt,
-    UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
-    UserScriptInjectionTime, WebContext, WebContextExt, WebResourceExt, WebView, WebViewExt,
-    WebsiteDataManager, WebsiteDataManagerExt,
-};
 
 use crate::bmc;
+use crate::webview::{self, ConsoleView};
 
 const LANG: &str = "en";
 
 const DISCONNECT_GRACE: Duration = Duration::from_millis(1500);
-const MAX_LOAD_RETRIES: u32 = 3;
 
 /// Where to connect and as whom.
 #[derive(Debug, Clone)]
@@ -73,7 +67,7 @@ struct Inner {
     tab_label: gtk::Label,
     tab_spinner: gtk::Spinner,
     tab: gtk::Box,
-    webview: RefCell<Option<WebView>>,
+    webview: RefCell<Option<ConsoleView>>,
     service_tag: RefCell<String>,
 }
 
@@ -228,7 +222,7 @@ impl ConsoleTab {
         self.0.title.borrow().clone()
     }
 
-    pub fn webview(&self) -> Option<WebView> {
+    fn view(&self) -> Option<ConsoleView> {
         self.0.webview.borrow().clone()
     }
 
@@ -248,38 +242,31 @@ impl ConsoleTab {
     /// A PNG of the console: the KVM canvas without Dell's toolbar, or (if the page has no
     /// readable canvas) a snapshot of the whole view.
     pub fn screenshot(&self, done: impl FnOnce(Result<Vec<u8>>) + 'static) {
-        let Some(view) = self.webview().filter(|_| self.is_connected()) else {
+        let Some(view) = self.view().filter(|_| self.is_connected()) else {
             return done(Err(anyhow::anyhow!("the console is not connected")));
         };
         if std::env::var_os("RUSTDRAC_DEBUG").is_some() {
-            view.evaluate_javascript(
-                CANVAS_INVENTORY_JS,
-                None,
-                None,
-                None::<&gtk::gio::Cancellable>,
-                |res| {
-                    if let Ok(v) = res {
-                        eprintln!("[canvases] {}", javascriptcore::ValueExt::to_str(&v));
-                    }
-                },
-            );
+            view.evaluate_js(CANVAS_INVENTORY_JS, |res| {
+                if let Some(v) = res {
+                    eprintln!("[canvases] {v}");
+                }
+            });
         }
         let fallback = view.clone();
-        view.evaluate_javascript(
-            CANVAS_PNG_JS,
-            None,
-            None,
-            None::<&gtk::gio::Cancellable>,
-            move |res| {
-                let data_url = res
-                    .ok()
-                    .map(|v| javascriptcore::ValueExt::to_str(&v).to_string());
-                match data_url.as_deref().and_then(decode_png_data_url) {
-                    Some(png) => done(Ok(png)),
-                    None => snapshot_png(&fallback, done),
-                }
-            },
-        );
+        view.evaluate_js(CANVAS_PNG_JS, move |data_url| {
+            match data_url.as_deref().and_then(decode_png_data_url) {
+                Some(png) => done(Ok(png)),
+                None => fallback.snapshot_png(done),
+            }
+        });
+    }
+
+    /// A PNG of the whole console view (test aid).
+    pub fn snapshot_png(&self, done: impl FnOnce(Result<Vec<u8>>) + 'static) {
+        match self.view() {
+            Some(view) => view.snapshot_png(done),
+            None => done(Err(anyhow::anyhow!("the console is not connected"))),
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -288,8 +275,8 @@ impl ConsoleTab {
 
     /// Give keyboard focus to the console so typing goes to the server.
     pub fn focus(&self) {
-        if let Some(view) = self.webview() {
-            view.grab_focus();
+        if let Some(view) = self.view() {
+            view.focus();
         }
     }
 
@@ -340,12 +327,7 @@ impl ConsoleTab {
                 self.logout_and_finish(c.session);
             }
             Err(_) if closing => self.finish(),
-            Err(e) => {
-                eprintln!("rustdrac: {}: {e:#}", self.0.target.host);
-                *self.0.state.borrow_mut() = State::Failed;
-                self.0.error.set_text(&format!("{e:#}"));
-                self.0.stack.set_visible_child_name("error");
-            }
+            Err(e) => self.show_error(&e),
             Ok(c) => {
                 if let Some(identity) = &c.identity {
                     *self.0.service_tag.borrow_mut() = identity.service_tag.clone();
@@ -359,9 +341,20 @@ impl ConsoleTab {
                 *self.0.title.borrow_mut() = title.clone();
                 (self.0.hooks.on_title)(&self.widget(), &title);
 
-                let view = self.build_webview(&c.session, &c.page);
-                self.0.stack.add_named(&view, "console");
-                view.show();
+                let view = match self.build_view(&c.session, &c.page) {
+                    Ok(view) => view,
+                    Err(e) => {
+                        self.show_error(&e);
+                        return self.logout_in_background(c.session);
+                    }
+                };
+                // A previous attempt (Retry after a failed load) may have left its widget.
+                if let Some(old) = self.0.stack.child_by_name("console") {
+                    self.0.stack.remove(&old);
+                }
+                let widget = view.widget();
+                self.0.stack.add_named(&widget, "console");
+                widget.show();
                 self.0.stack.set_visible_child_name("console");
                 *self.0.webview.borrow_mut() = Some(view);
                 *self.0.state.borrow_mut() = State::Connected {
@@ -371,6 +364,57 @@ impl ConsoleTab {
                 self.focus();
             }
         }
+    }
+
+    fn build_view(&self, session: &bmc::Session, page: &bmc::ConsolePage) -> Result<ConsoleView> {
+        let weak = self.downgrade();
+        let on_close_requested = Box::new(move || {
+            if let Some(tab) = upgrade(&weak) {
+                tab.close();
+            }
+        });
+        let weak = self.downgrade();
+        let on_load_failed = Box::new(move |msg: String| {
+            if let Some(tab) = upgrade(&weak) {
+                tab.view_failed(msg);
+            }
+        });
+        let hooks = webview::Hooks {
+            on_close_requested,
+            on_load_failed,
+        };
+        ConsoleView::new(page, session.host(), hooks)
+    }
+
+    fn show_error(&self, e: &anyhow::Error) {
+        eprintln!("rustdrac: {}: {e:#}", self.0.target.host);
+        *self.0.state.borrow_mut() = State::Failed;
+        self.0.error.set_text(&format!("{e:#}"));
+        self.0.stack.set_visible_child_name("error");
+    }
+
+    /// The view gave up on the page: log out so the BMC session is not left open, and
+    /// offer Retry.
+    fn view_failed(&self, msg: String) {
+        let state = std::mem::replace(&mut *self.0.state.borrow_mut(), State::Failed);
+        let State::Connected { session, .. } = state else {
+            *self.0.state.borrow_mut() = state;
+            return;
+        };
+        if let Some(view) = self.0.webview.borrow_mut().take() {
+            view.close();
+        }
+        self.show_error(&anyhow::anyhow!(msg));
+        self.logout_in_background(session);
+    }
+
+    fn logout_in_background(&self, session: bmc::Session) {
+        let client = self.0.client.clone();
+        gtk::gio::spawn_blocking(move || {
+            if let Err(e) = bmc::logout(&client, &session) {
+                eprintln!("rustdrac: {e:#}");
+            }
+        });
     }
 
     /// Disconnect the console and log out, then remove the tab.
@@ -394,15 +438,9 @@ impl ConsoleTab {
                     .tab_label
                     .set_text(&format!("{} (closing)", self.0.target.name));
                 self.set_busy(true);
-                if let Some(view) = self.webview() {
+                if let Some(view) = self.view() {
                     match disconnect_js {
-                        Some(js) => view.evaluate_javascript(
-                            js,
-                            None,
-                            None,
-                            None::<&gtk::gio::Cancellable>,
-                            |_| {},
-                        ),
+                        Some(js) => view.evaluate_js(js, |_| {}),
                         None => view.load_uri("about:blank"),
                     }
                 }
@@ -439,109 +477,9 @@ impl ConsoleTab {
         self.set_busy(false);
         // Drop the web view first so its WebSocket is gone before the page is removed.
         if let Some(view) = self.0.webview.borrow_mut().take() {
-            view.try_close();
+            view.close();
         }
         (self.0.hooks.on_closed)(&self.widget());
-    }
-
-    fn build_webview(&self, session: &bmc::Session, page: &bmc::ConsolePage) -> WebView {
-        // Ephemeral per tab: separate cookies per BMC session, nothing written to disk.
-        let data = WebsiteDataManager::new_ephemeral();
-        data.set_tls_errors_policy(TLSErrorsPolicy::Ignore);
-        let context = WebContext::with_website_data_manager(&data);
-        // navigator.language picks the viewer's UI language; the process locale may be "C".
-        context.set_preferred_languages(&["en-US"]);
-        let scripts = UserContentManager::new();
-        scripts.add_script(&UserScript::new(
-            &page.script,
-            UserContentInjectedFrames::TopFrame,
-            UserScriptInjectionTime::Start,
-            &[],
-            &[],
-        ));
-        let webview = WebView::builder()
-            .web_context(&context)
-            .user_content_manager(&scripts)
-            .build();
-        let debug = std::env::var_os("RUSTDRAC_DEBUG").is_some();
-        if let Some(settings) = WebViewExt::settings(&webview) {
-            settings.set_enable_developer_extras(std::env::var_os("RUSTDRAC_DEVTOOLS").is_some());
-            settings.set_javascript_can_open_windows_automatically(true);
-            settings.set_enable_write_console_messages_to_stdout(debug);
-        }
-        if debug {
-            webview.connect_resource_load_started(|_, resource, request| {
-                let uri = request.uri().unwrap_or_default();
-                eprintln!("[req] {uri}");
-                resource.connect_finished(move |r| {
-                    let status = r.response().map(|r| r.status_code()).unwrap_or(0);
-                    eprintln!("[{status}] {uri}");
-                });
-                resource.connect_failed(|r, e| {
-                    eprintln!("[fail] {} {e}", r.uri().unwrap_or_default());
-                });
-            });
-        }
-
-        // Same-origin popups (chat, help, ...) get their own window.
-        webview.connect_create(|view, _| {
-            let popup = WebView::builder().related_view(view).build();
-            let win = gtk::Window::new(gtk::WindowType::Toplevel);
-            win.set_default_size(700, 500);
-            win.add(&popup);
-            let w = win.clone();
-            popup.connect_ready_to_show(move |_| w.show_all());
-            let w = win.clone();
-            popup.connect_close(move |_| w.close());
-            Some(popup.upcast())
-        });
-
-        // BMC web servers occasionally drop connections; retry the console page a few times.
-        let retries = Cell::new(0);
-        webview.connect_load_failed(move |view, _, uri, err| {
-            if retries.get() >= MAX_LOAD_RETRIES || uri.is_empty() {
-                return false;
-            }
-            retries.set(retries.get() + 1);
-            eprintln!("rustdrac: loading console failed ({err}), retrying");
-            let (view, uri) = (view.clone(), uri.to_string());
-            glib::timeout_add_local_once(Duration::from_secs(2), move || view.load_uri(&uri));
-            true
-        });
-
-        // The viewer's "Disconnect Viewer" button ends with window.close().
-        let weak = self.downgrade();
-        webview.connect_close(move |_| {
-            if let Some(tab) = upgrade(&weak) {
-                tab.close();
-            }
-        });
-
-        // Load the page once every session cookie is in place.
-        let console_url = page.url.clone();
-        let view = webview.clone();
-        match data.cookie_manager() {
-            Some(manager) if !page.cookies.is_empty() => {
-                let pending = Rc::new(Cell::new(page.cookies.len()));
-                for c in &page.cookies {
-                    let mut cookie = soup::Cookie::new(&c.name, &c.value, session.host(), "/", -1);
-                    cookie.set_secure(true);
-                    cookie.set_http_only(c.http_only);
-                    let (view, url, pending) = (view.clone(), console_url.clone(), pending.clone());
-                    manager.add_cookie(&mut cookie, None::<&gtk::gio::Cancellable>, move |res| {
-                        if let Err(e) = res {
-                            eprintln!("rustdrac: setting session cookie: {e}");
-                        }
-                        pending.set(pending.get() - 1);
-                        if pending.get() == 0 {
-                            view.load_uri(&url);
-                        }
-                    });
-                }
-            }
-            _ => view.load_uri(&console_url),
-        }
-        webview
     }
 }
 
@@ -549,24 +487,6 @@ fn decode_png_data_url(url: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     let b64 = url.strip_prefix("data:image/png;base64,")?;
     base64::engine::general_purpose::STANDARD.decode(b64).ok()
-}
-
-fn snapshot_png(view: &WebView, done: impl FnOnce(Result<Vec<u8>>) + 'static) {
-    view.snapshot(
-        webkit2gtk::SnapshotRegion::Visible,
-        webkit2gtk::SnapshotOptions::NONE,
-        None::<&gtk::gio::Cancellable>,
-        move |res| {
-            done((|| {
-                let surface = res?;
-                let image = gtk::cairo::ImageSurface::try_from(surface)
-                    .map_err(|_| anyhow::anyhow!("snapshot is not an image"))?;
-                let mut png = Vec::new();
-                image.write_to_png(&mut png)?;
-                Ok(png)
-            })())
-        },
-    );
 }
 
 fn upgrade(weak: &Weak<Inner>) -> Option<ConsoleTab> {
