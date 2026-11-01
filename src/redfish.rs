@@ -1,6 +1,6 @@
 //! Health, sensors and the System Event Log (SEL) over Redfish.
 //!
-//! Redfish uses HTTP basic auth per request, so none of this takes one of the iDRAC's few
+//! Redfish uses HTTP basic auth per request, so none of this takes one of the BMC's few
 //! web-session slots (or disturbs an open console).
 
 use std::collections::HashMap;
@@ -11,14 +11,58 @@ use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
-const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
-const CHASSIS: &str = "/redfish/v1/Chassis/System.Embedded.1";
-const SEL_SERVICE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Sel";
-const SEL_ENTRIES: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Sel";
-const LC_SERVICE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Lclog";
-const LC_ENTRIES: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Lclog";
-pub const SYSTEM_PATH: &str = SYSTEM;
-pub const CHASSIS_PATH: &str = CHASSIS;
+use crate::bmc::{self, Vendor};
+
+/// Where a vendor keeps things, and which query options its firmware accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Paths {
+    pub system: &'static str,
+    pub chassis: &'static str,
+    pub manager: &'static str,
+    pub sel_service: &'static str,
+    /// The entries collection, when known (saves a slow request on an iDRAC 8).
+    pub sel_entries: Option<&'static str>,
+    /// The BMC's own log (Dell's Lifecycle log, Supermicro's maintenance log).
+    pub aux_log_service: &'static str,
+    pub aux_log_entries: Option<&'static str>,
+    /// `?$expand=*($levels=1)` works. Supermicro answers any query string with a redirect
+    /// to a mangled URL and then HTTP 501.
+    pub expand: bool,
+    /// Page by `$skip` when a page has no `nextLink` (iDRAC 8). Supermicro returns the whole
+    /// collection at once and ignores `$skip`, which would loop.
+    pub skip_paging: bool,
+}
+
+const DELL: Paths = Paths {
+    system: "/redfish/v1/Systems/System.Embedded.1",
+    chassis: "/redfish/v1/Chassis/System.Embedded.1",
+    manager: "/redfish/v1/Managers/iDRAC.Embedded.1",
+    sel_service: "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Sel",
+    sel_entries: Some("/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Sel"),
+    aux_log_service: "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Lclog",
+    aux_log_entries: Some("/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Lclog"),
+    expand: true,
+    skip_paging: true,
+};
+
+const SUPERMICRO: Paths = Paths {
+    system: "/redfish/v1/Systems/1",
+    chassis: "/redfish/v1/Chassis/1",
+    manager: "/redfish/v1/Managers/1",
+    sel_service: "/redfish/v1/Systems/1/LogServices/Log1",
+    sel_entries: Some("/redfish/v1/Systems/1/LogServices/Log1/Entries"),
+    aux_log_service: "/redfish/v1/Managers/1/LogServices/Log1",
+    aux_log_entries: Some("/redfish/v1/Managers/1/LogServices/Log1/Entries"),
+    expand: false,
+    skip_paging: false,
+};
+
+pub fn paths(vendor: Vendor) -> &'static Paths {
+    match vendor {
+        Vendor::Dell => &DELL,
+        Vendor::Supermicro => &SUPERMICRO,
+    }
+}
 
 /// Redfish health, ordered from best to worst so `max()` gives the overall state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -138,7 +182,7 @@ enum GetError {
     Fatal(anyhow::Error),
 }
 
-/// One lock per iDRAC host, shared by every Redfish client in the process.
+/// One lock per BMC host, shared by every Redfish client in the process.
 fn host_lock(host: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     LOCKS
@@ -150,7 +194,7 @@ fn host_lock(host: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// A Redfish client for one iDRAC. Cheap to clone; clones share the HTTP connection pool,
+/// A Redfish client for one BMC. Cheap to clone; clones share the HTTP connection pool,
 /// which matters on an iDRAC 8: a TLS handshake there takes seconds.
 #[derive(Clone)]
 pub struct Redfish {
@@ -158,6 +202,8 @@ pub struct Redfish {
     host: String,
     user: String,
     password: String,
+    /// Known up front (from the address book), or detected on first use.
+    vendor: Option<Vendor>,
 }
 
 /// One step of reading the full health, so the UI can show results as they arrive.
@@ -187,10 +233,29 @@ impl Redfish {
             host: host.to_string(),
             user: user.to_string(),
             password: password.to_string(),
+            vendor: None,
         }
     }
 
-    /// GET a Redfish resource. Requests to one iDRAC are serialised: an iDRAC 8 handles
+    /// Use the saved vendor instead of probing the host (`None` keeps probing).
+    pub fn with_vendor(mut self, vendor: Option<Vendor>) -> Self {
+        self.vendor = vendor;
+        self
+    }
+
+    /// The vendor given to [`Redfish::with_vendor`], else probed (once per host per run).
+    pub fn vendor(&self) -> Result<Vendor> {
+        match self.vendor {
+            Some(v) => Ok(v),
+            None => bmc::vendor(&self.client, &self.host),
+        }
+    }
+
+    pub fn paths(&self) -> Result<&'static Paths> {
+        Ok(paths(self.vendor()?))
+    }
+
+    /// GET a Redfish resource. Requests to one BMC are serialised: an iDRAC 8 handles
     /// one at a time anyway and answers concurrent ones with errors or garbage. Transient
     /// failures are retried.
     fn get(&self, path: &str) -> Result<Value> {
@@ -295,18 +360,19 @@ impl Redfish {
 
     /// Overall system, processor and memory health (one request).
     pub fn system(&self) -> Result<HealthReport> {
-        Ok(system_report(&self.get(SYSTEM)?))
+        Ok(system_report(&self.get(self.paths()?.system)?))
     }
 
     /// Sensors of one step; for storage also the drives to read with [`Redfish::drive`].
     pub fn step(&self, step: Step) -> Result<(Vec<Sensor>, Vec<String>)> {
+        let chassis = self.paths()?.chassis;
         match step {
             Step::Power => Ok((
-                power_sensors(&self.get(&format!("{CHASSIS}/Power"))?),
+                power_sensors(&self.get(&format!("{chassis}/Power"))?),
                 vec![],
             )),
             Step::Thermal => Ok((
-                thermal_sensors(&self.get(&format!("{CHASSIS}/Thermal"))?),
+                thermal_sensors(&self.get(&format!("{chassis}/Thermal"))?),
                 vec![],
             )),
             Step::Storage => self.storage(),
@@ -314,7 +380,7 @@ impl Redfish {
     }
 
     fn storage(&self) -> Result<(Vec<Sensor>, Vec<String>)> {
-        let storage = self.get(&format!("{SYSTEM}/Storage"))?;
+        let storage = self.get(&format!("{}/Storage", self.paths()?.system))?;
         let mut sensors = Vec::new();
         let mut drives = Vec::new();
         for member in members(&storage) {
@@ -362,7 +428,8 @@ impl Redfish {
 
     /// The whole SEL, newest first.
     pub fn sel(&self) -> Result<Vec<SelEntry>> {
-        let raw = self.log_members(SEL_ENTRIES, SEL_SERVICE, usize::MAX)?;
+        let p = self.paths()?;
+        let raw = self.log_members(p.sel_entries, p.sel_service, usize::MAX)?;
         let mut entries: Vec<SelEntry> = raw.iter().map(sel_entry).collect();
         entries.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
         // Pages can overlap if entries are logged while paging.
@@ -370,17 +437,26 @@ impl Redfish {
         Ok(entries)
     }
 
-    /// Up to `limit` Lifecycle Controller log entries, as the iDRAC returns them.
-    pub fn lc_log(&self, limit: usize) -> Result<Vec<Value>> {
-        self.log_members(LC_ENTRIES, LC_SERVICE, limit)
+    /// Up to `limit` entries of the BMC's own log (see [`Vendor::aux_log_name`]), newest
+    /// first as the BMC returns them.
+    pub fn aux_log(&self, limit: usize) -> Result<Vec<Value>> {
+        let p = self.paths()?;
+        self.log_members(p.aux_log_entries, p.aux_log_service, limit)
     }
 
-    /// Raw members of a log's entry collection, following the iDRAC's paging, up to `limit`.
-    fn log_members(&self, known_entries: &str, service: &str, limit: usize) -> Result<Vec<Value>> {
-        // Known iDRAC 8 location first (saves a slow request); otherwise ask the log service.
-        let (base, mut page) = match self.get(known_entries) {
-            Ok(page) => (known_entries.to_string(), page),
-            Err(_) => {
+    /// Raw members of a log's entry collection, following the BMC's paging, up to `limit`.
+    fn log_members(
+        &self,
+        known_entries: Option<&str>,
+        service: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let skip_paging = self.paths()?.skip_paging;
+        // Known location first (saves a slow request); otherwise ask the log service.
+        let known = known_entries.and_then(|path| self.get(path).ok().map(|page| (path, page)));
+        let (base, mut page) = match known {
+            Some((path, page)) => (path.to_string(), page),
+            None => {
                 let service_doc = self.get(service)?;
                 let base = service_doc["Entries"]["@odata.id"]
                     .as_str()
@@ -404,7 +480,7 @@ impl Redfish {
             // An iDRAC 8 pages by $skip and leaves nextLink empty, so page by count as well.
             let next = match page["Members@odata.nextLink"].as_str().map(str::trim) {
                 Some(link) if !link.is_empty() && link != current => link.to_string(),
-                _ if got > 0 && entries.len() < total => {
+                _ if skip_paging && got > 0 && entries.len() < total => {
                     format!("{base}?$skip={}", entries.len())
                 }
                 _ => break,
@@ -420,12 +496,17 @@ impl Redfish {
         self.get(path)
     }
 
-    /// The members of a collection, expanded. Asks for `$expand` (one request) and falls
-    /// back to fetching each member where the firmware returns links only.
+    /// The members of a collection, expanded. Asks for `$expand` (one request) where the
+    /// firmware supports it, and fetches each member where it returns links only.
     pub fn collection(&self, path: &str) -> Result<Vec<Value>> {
-        let doc = match self.get(&format!("{path}?$expand=*($levels=1)")) {
-            Ok(doc) => doc,
-            Err(_) => self.get(path)?,
+        let expanded = self
+            .paths()?
+            .expand
+            .then(|| self.get(&format!("{path}?$expand=*($levels=1)")).ok())
+            .flatten();
+        let doc = match expanded {
+            Some(doc) => doc,
+            None => self.get(path)?,
         };
         let mut out = Vec::new();
         for member in doc["Members"].as_array().into_iter().flatten() {
@@ -441,8 +522,9 @@ impl Redfish {
     pub fn clear_sel(&self) -> Result<()> {
         self.client
             .post(format!(
-                "https://{}{SEL_SERVICE}/Actions/LogService.ClearLog",
-                self.host
+                "https://{}{}/Actions/LogService.ClearLog",
+                self.host,
+                self.paths()?.sel_service
             ))
             .basic_auth(&self.user, Some(&self.password))
             .json(&serde_json::json!({}))
@@ -531,9 +613,15 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
     let mut sensors = Vec::new();
     for psu in power["PowerSupplies"].as_array().into_iter().flatten() {
         if let Some(health) = status_health(psu) {
+            // Supermicro reports no capacity, but the current output.
             let watts = psu["PowerCapacityWatts"]
                 .as_f64()
                 .map(|w| format!("{w:.0} W capacity"))
+                .or_else(|| {
+                    psu["PowerOutputWatts"]
+                        .as_f64()
+                        .map(|w| format!("{w:.0} W output"))
+                })
                 .unwrap_or_default();
             sensors.push(Sensor {
                 category: "Power Supply",
@@ -628,6 +716,17 @@ fn sel_entry(e: &Value) -> SelEntry {
             .unwrap_or_default()
             .to_string()
     };
+    // Dell names the sensor type; Supermicro has an OEM type plus the raw IPMI sensor name
+    // (often just "OEM").
+    let mut sensor = first_member("SensorType");
+    if sensor.is_empty() {
+        let raw = str_field(&e["Oem"]["Supermicro"]["RawEventData"], "SensorName");
+        sensor = if raw.is_empty() || raw == "OEM" {
+            str_field(e, "OemSensorType")
+        } else {
+            raw
+        };
+    }
     SelEntry {
         id: e["Id"]
             .as_str()
@@ -637,7 +736,7 @@ fn sel_entry(e: &Value) -> SelEntry {
         created: str_field(e, "Created"),
         severity: Health::parse(e["Severity"].as_str()),
         message: str_field(e, "Message"),
-        sensor: first_member("SensorType"),
+        sensor,
         event: first_member("EntryCode"),
     }
 }
@@ -708,6 +807,100 @@ mod tests {
                 .unwrap()
                 .starts_with("2,\"2026-10-30T02:03:59+09:00\",Critical,")
         );
+    }
+
+    #[test]
+    fn parses_sel_entries_like_supermicro_x11() {
+        let e = json!({
+            "@odata.id": "/redfish/v1/Systems/1/LogServices/Log1/Entries/1",
+            "Id": "1", "Name": "Health Event Log Entry 1", "EntryType": "SEL",
+            "Severity": "Warning", "Created": "2018-11-27T23:01:00Z", "EntryCode": "Assert",
+            "OemSensorType": "ACPowerOn", "SensorNumber": 255,
+            "Message": "[ OEM ] First AC Power on", "MessageId": "0xA0FFFF",
+            "Oem": {"Supermicro": {"RawEventData": {"EventDirAndType": "0x6F",
+                "SensorType": "0xC8", "SensorName": "OEM", "EventData1": "0xA0"}}}
+        });
+        assert_eq!(
+            sel_entry(&e),
+            SelEntry {
+                id: 1,
+                created: "2018-11-27T23:01:00Z".into(),
+                severity: Health::Warning,
+                message: "[ OEM ] First AC Power on".into(),
+                sensor: "ACPowerOn".into(),
+                event: "Assert".into(),
+            }
+        );
+        let named = json!({"Id": "7", "Severity": "Critical", "EntryCode": "Assert",
+            "OemSensorType": "Temperature", "Message": "CPU1 Temp upper critical",
+            "Oem": {"Supermicro": {"RawEventData": {"SensorName": "CPU1 Temp"}}}});
+        assert_eq!(sel_entry(&named).sensor, "CPU1 Temp");
+    }
+
+    #[test]
+    fn supermicro_power_and_thermal_use_the_standard_fields() {
+        let power = json!({"PowerSupplies": [
+            {"Name": "Power Supply Bay 1", "Status": {"State": "Enabled", "Health": "OK"},
+             "PowerCapacityWatts": null, "PowerInputWatts": 430, "PowerOutputWatts": 397,
+             "Model": "PWS-2K22A-1R"}],
+            "Voltages": [{"Name": "12V", "Status": {"State": "Enabled", "Health": "OK"}, "ReadingVolts": 12.305}],
+            "PowerControl": [{"Name": "System Power Control", "PowerConsumedWatts": 135,
+                "Status": {"State": "Enabled", "Health": "OK"}}]});
+        let sensors = power_sensors(&power);
+        assert_eq!(sensors[0].name, "Power Supply Bay 1");
+        assert_eq!(sensors[0].reading, "397 W output");
+        assert_eq!(sensors[1].reading, "12.30 V");
+        assert_eq!(sensors[2].reading, "135 W");
+
+        let thermal = json!({
+            "Fans": [{"Name": "FAN1", "Status": {"State": "Enabled", "Health": "OK"},
+                "ReadingUnits": "RPM", "Reading": 8700}],
+            "Temperatures": [{"Name": "CPU1 Temp", "Status": {"State": "Enabled", "Health": "OK"},
+                "ReadingCelsius": 50, "UpperThresholdCritical": 98}]});
+        let sensors = thermal_sensors(&thermal);
+        assert_eq!(
+            (sensors[0].name.as_str(), sensors[0].reading.as_str()),
+            ("FAN1", "8700 RPM")
+        );
+        assert_eq!(sensors[1].reading, "50 °C (critical at 98 °C)");
+
+        let system = json!({"Model": "SYS-2029BT-HNTR", "PowerState": "On",
+            "Status": {"State": "Enabled", "Health": "OK"},
+            "ProcessorSummary": {"Count": 2, "Model": "Intel(R) Xeon(R) processor",
+                "Status": {"State": "Enabled", "Health": "OK", "HealthRollup": "OK"}},
+            "MemorySummary": {"TotalSystemMemoryGiB": 256,
+                "Status": {"State": "Enabled", "Health": "OK", "HealthRollup": "OK"}}});
+        let report = system_report(&system);
+        assert_eq!(report.overall, Health::Ok);
+        assert_eq!(report.sensors[2].reading, "256 GiB");
+    }
+
+    #[test]
+    fn dell_paths_are_the_known_ones() {
+        let p = paths(Vendor::Dell);
+        assert_eq!(p.system, "/redfish/v1/Systems/System.Embedded.1");
+        assert_eq!(p.chassis, "/redfish/v1/Chassis/System.Embedded.1");
+        assert_eq!(p.manager, "/redfish/v1/Managers/iDRAC.Embedded.1");
+        assert_eq!(
+            p.sel_service,
+            "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Sel"
+        );
+        assert_eq!(
+            p.sel_entries,
+            Some("/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Sel")
+        );
+        assert_eq!(
+            p.aux_log_service,
+            "/redfish/v1/Managers/iDRAC.Embedded.1/LogServices/Lclog"
+        );
+        assert_eq!(
+            p.aux_log_entries,
+            Some("/redfish/v1/Managers/iDRAC.Embedded.1/Logs/Lclog")
+        );
+        assert!(p.expand && p.skip_paging);
+        let s = paths(Vendor::Supermicro);
+        assert_eq!(s.system, "/redfish/v1/Systems/1");
+        assert!(!s.expand && !s.skip_paging);
     }
 
     #[test]

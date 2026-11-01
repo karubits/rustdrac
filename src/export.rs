@@ -1,6 +1,6 @@
 //! "Export logs…": one zip per server for a support case or an audit, with a hardware
-//! summary, the component health, the SEL and the Lifecycle Controller log. Credentials
-//! are never written into it.
+//! summary, the component health, the SEL and the BMC's own log (Dell's Lifecycle Controller
+//! log, Supermicro's maintenance log). Credentials are never written into it.
 
 use std::io::{Cursor, Write};
 
@@ -8,15 +8,17 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use zip::write::SimpleFileOptions;
 
-use crate::redfish::{self, CHASSIS_PATH, HealthReport, Redfish, SYSTEM_PATH, str_field};
+use crate::bmc::Vendor;
+use crate::redfish::{self, HealthReport, Redfish, str_field};
 
-/// How many Lifecycle Controller entries to include (the newest). iDRAC 8 returns 50 per
-/// ~5 s request, so the full log (thousands) would take minutes.
-const LC_LOG_LIMIT: usize = 500;
+/// How many BMC log entries to include (the newest). iDRAC 8 returns 50 per ~5 s request,
+/// so the full Lifecycle log (thousands) would take minutes.
+const AUX_LOG_LIMIT: usize = 500;
 
-/// Everything read from the iDRAC, before it is turned into files.
+/// Everything read from the BMC, before it is turned into files.
 #[derive(Debug, Default)]
 pub struct Collected {
+    pub vendor: Vendor,
     pub system: Value,
     pub manager: Value,
     pub processors: Vec<Value>,
@@ -26,7 +28,8 @@ pub struct Collected {
     pub power: Value,
     pub health: Option<HealthReport>,
     pub sel: Vec<redfish::SelEntry>,
-    pub lc_log: Vec<Value>,
+    /// The BMC's own log, see [`Vendor::aux_log_name`].
+    pub aux_log: Vec<Value>,
     /// Parts that could not be read; the export still goes ahead without them.
     pub errors: Vec<String>,
 }
@@ -52,46 +55,44 @@ pub fn collect(
     }
     // The system is required: without it there is nothing to export.
     progress("system");
-    c.system = rf.json(SYSTEM_PATH)?;
-    step!(
-        "iDRAC",
-        c.manager,
-        rf.json("/redfish/v1/Managers/iDRAC.Embedded.1")
-    );
+    c.vendor = rf.vendor()?;
+    let p = rf.paths()?;
+    c.system = rf.json(p.system)?;
+    step!(c.vendor.bmc_name(), c.manager, rf.json(p.manager));
     step!(
         "processors",
         c.processors,
-        rf.collection(&format!("{SYSTEM_PATH}/Processors"))
+        rf.collection(&format!("{}/Processors", p.system))
     );
     step!(
         "memory",
         c.memory,
-        rf.collection(&format!("{SYSTEM_PATH}/Memory"))
+        rf.collection(&format!("{}/Memory", p.system))
     );
-    step!("storage", c.storage, read_storage(rf));
+    step!("storage", c.storage, read_storage(rf, p.system));
     step!(
         "network",
         c.network,
-        rf.collection(&format!("{SYSTEM_PATH}/EthernetInterfaces"))
+        rf.collection(&format!("{}/EthernetInterfaces", p.system))
     );
     step!(
         "power supplies",
         c.power,
-        rf.json(&format!("{CHASSIS_PATH}/Power"))
+        rf.json(&format!("{}/Power", p.chassis))
     );
     step!("component health", c.health, rf.full_health().map(Some));
     step!("System Event Log", c.sel, rf.sel());
     step!(
-        "Lifecycle Controller log",
-        c.lc_log,
-        rf.lc_log(LC_LOG_LIMIT)
+        c.vendor.aux_log_name(),
+        c.aux_log,
+        rf.aux_log(AUX_LOG_LIMIT)
     );
     Ok(c)
 }
 
-fn read_storage(rf: &Redfish) -> Result<Vec<(Value, Vec<Value>)>> {
+fn read_storage(rf: &Redfish, system: &str) -> Result<Vec<(Value, Vec<Value>)>> {
     let mut out = Vec::new();
-    for controller in rf.collection(&format!("{SYSTEM_PATH}/Storage"))? {
+    for controller in rf.collection(&format!("{system}/Storage"))? {
         let mut drives = Vec::new();
         for link in controller["Drives"].as_array().into_iter().flatten() {
             if let Some(path) = link["@odata.id"].as_str() {
@@ -175,21 +176,28 @@ pub fn summary_json(c: &Collected, name: &str, host: &str, exported_at: &str) ->
             })
             .collect()
     };
+    // Dell's service tag is the SKU; elsewhere the serial number is the identity.
+    let service_tag = match c.vendor {
+        Vendor::Dell => s(&c.system, "SKU"),
+        Vendor::Supermicro => s(&c.system, "SerialNumber"),
+    };
     json!({
         "exported_at": exported_at,
         "name": name,
         "address": host,
+        "vendor": c.vendor.label(),
         "system": {
             "manufacturer": s(&c.system, "Manufacturer"),
             "model": s(&c.system, "Model"),
-            "service_tag": s(&c.system, "SKU"),
+            "service_tag": service_tag,
             "serial_number": s(&c.system, "SerialNumber"),
             "bios_version": s(&c.system, "BiosVersion"),
             "host_name": s(&c.system, "HostName"),
             "power_state": s(&c.system, "PowerState"),
             "health": health_of(&c.system),
         },
-        "idrac": {
+        "bmc": {
+            "kind": c.vendor.bmc_name(),
             "model": s(&c.manager, "Model"),
             "firmware": s(&c.manager, "FirmwareVersion"),
         },
@@ -237,7 +245,11 @@ pub fn summary_json(c: &Collected, name: &str, host: &str, exported_at: &str) ->
             "entries": c.sel.len(),
             "warning_or_critical": c.sel.iter().filter(|e| e.severity.is_alarm()).count(),
         },
-        "lc_log_entries": c.lc_log.len(),
+        "bmc_log": {
+            "kind": c.vendor.aux_log_name(),
+            "entries": c.aux_log.len(),
+            "file": c.vendor.aux_log_file(),
+        },
         "errors": c.errors,
     })
 }
@@ -267,13 +279,16 @@ pub fn summary_text(j: &Value) -> String {
         t(&sys["manufacturer"]),
         t(&sys["model"])
     ));
-    line(format!("Service tag:   {}", t(&sys["service_tag"])));
+    if t(&sys["service_tag"]) != t(&sys["serial_number"]) {
+        line(format!("Service tag:   {}", t(&sys["service_tag"])));
+    }
     line(format!("Serial:        {}", t(&sys["serial_number"])));
     line(format!("BIOS:          {}", t(&sys["bios_version"])));
     line(format!(
-        "iDRAC:         {} firmware {}",
-        t(&j["idrac"]["model"]),
-        t(&j["idrac"]["firmware"])
+        "{:<15}{} firmware {}",
+        format!("{}:", t(&j["bmc"]["kind"])),
+        t(&j["bmc"]["model"]),
+        t(&j["bmc"]["firmware"])
     ));
     line(format!("Host name:     {}", t(&sys["host_name"])));
     line(format!("Power:         {}", t(&sys["power_state"])));
@@ -323,13 +338,21 @@ pub fn summary_text(j: &Value) -> String {
             t(&ctl["health"])
         ));
         for d in ctl["drives"].as_array().into_iter().flatten() {
-            out.push_str(&format!(
-                "    {}: {} {} GB {} {}, serial {} [{}]\n",
-                t(&d["name"]),
+            // Not every BMC reports a capacity or media type (Supermicro's NVMe backplane).
+            let details = [
                 t(&d["model"]),
-                t(&d["capacity_gb"]),
+                t(&d["capacity_gb"]).with_unit(" GB"),
                 t(&d["media"]),
                 t(&d["protocol"]),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            out.push_str(&format!(
+                "    {}: {}, serial {} [{}]\n",
+                t(&d["name"]),
+                details,
                 t(&d["serial"]),
                 t(&d["health"])
             ));
@@ -347,10 +370,10 @@ pub fn summary_text(j: &Value) -> String {
     });
     section(&mut out, "Power supplies", &j["power_supplies"], &|p| {
         format!(
-            "{}: {} {} W, firmware {} [{}]",
+            "{}: {}{}, firmware {} [{}]",
             t(&p["name"]),
             t(&p["model"]),
-            t(&p["capacity_w"]),
+            t(&p["capacity_w"]).with_unit(" W").with_prefix(" "),
             t(&p["firmware"]),
             t(&p["health"])
         )
@@ -361,8 +384,10 @@ pub fn summary_text(j: &Value) -> String {
         t(&j["sel"]["warning_or_critical"])
     ));
     out.push_str(&format!(
-        "Lifecycle Controller log: newest {} entries (lclog.csv)\n",
-        t(&j["lc_log_entries"])
+        "{}: newest {} entries ({})\n",
+        t(&j["bmc_log"]["kind"]),
+        t(&j["bmc_log"]["entries"]),
+        t(&j["bmc_log"]["file"])
     ));
     if let Some(errors) = j["errors"].as_array().filter(|e| !e.is_empty()) {
         out.push_str("\nCould not read:\n");
@@ -375,6 +400,10 @@ pub fn summary_text(j: &Value) -> String {
 
 trait IfEmpty {
     fn if_empty(self, other: &str) -> String;
+    /// `self` followed by `unit`, or nothing when `self` is empty.
+    fn with_unit(self, unit: &str) -> String;
+    /// `prefix` followed by `self`, or nothing when `self` is empty.
+    fn with_prefix(self, prefix: &str) -> String;
 }
 
 impl IfEmpty for String {
@@ -383,6 +412,18 @@ impl IfEmpty for String {
             other.to_string()
         } else {
             self
+        }
+    }
+
+    fn with_unit(self, unit: &str) -> String {
+        if self.is_empty() { self } else { self + unit }
+    }
+
+    fn with_prefix(self, prefix: &str) -> String {
+        if self.is_empty() {
+            self
+        } else {
+            format!("{prefix}{self}")
         }
     }
 }
@@ -405,23 +446,32 @@ fn health_csv(report: &HealthReport) -> String {
     out
 }
 
-fn lc_log_csv(entries: &[Value]) -> String {
+fn aux_log_csv(entries: &[Value]) -> String {
     let mut out = String::from("Id,Created,Severity,MessageId,Message\n");
     for e in entries {
+        // Supermicro's maintenance log has no message id; say who did it over what instead.
+        let mut id = str_field(e, "MessageId");
+        if id.is_empty() {
+            let smc = &e["Oem"]["Supermicro"];
+            let (user, interface) = (str_field(smc, "User"), str_field(smc, "Interface"));
+            if !user.is_empty() || !interface.is_empty() {
+                id = format!("{user}@{interface}");
+            }
+        }
         out += &format!(
             "{},{},{},{},{}\n",
             csv_quote(&str_field(e, "Id")),
             csv_quote(&str_field(e, "Created")),
             csv_quote(&str_field(e, "Severity")),
-            csv_quote(&str_field(e, "MessageId")),
+            csv_quote(&id),
             csv_quote(&str_field(e, "Message"))
         );
     }
     out
 }
 
-/// The zip archive: `summary.txt`, `summary.json`, `health.csv`, `sel.csv`, `lclog.csv`,
-/// all inside a folder named after the archive.
+/// The zip archive: `summary.txt`, `summary.json`, `health.csv`, `sel.csv` and the BMC log
+/// (`lclog.csv` or `maintenance.csv`), all inside a folder named after the archive.
 pub fn build_zip(c: &Collected, folder: &str, summary: &Value) -> Result<Vec<u8>> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -439,7 +489,7 @@ pub fn build_zip(c: &Collected, folder: &str, summary: &Value) -> Result<Vec<u8>
         add("health.csv", health_csv(h).as_bytes())?;
     }
     add("sel.csv", redfish::sel_csv(&c.sel).as_bytes())?;
-    add("lclog.csv", lc_log_csv(&c.lc_log).as_bytes())?;
+    add(c.vendor.aux_log_file(), aux_log_csv(&c.aux_log).as_bytes())?;
     Ok(zip.finish()?.into_inner())
 }
 
@@ -471,6 +521,7 @@ mod tests {
 
     fn sample() -> Collected {
         Collected {
+            vendor: Vendor::Dell,
             system: json!({"Manufacturer": "Dell Inc.", "Model": "PowerEdge R630", "SKU": "ABC1234",
                 "SerialNumber": "CN123", "BiosVersion": "2.19.0", "PowerState": "On",
                 "Status": {"Health": "OK", "HealthRollup": "OK", "State": "Enabled"}}),
@@ -487,6 +538,14 @@ mod tests {
             power: json!({"PowerSupplies": [
                 {"Name": "PS1 Status", "PowerCapacityWatts": 750, "Status": {"Health": "OK", "State": "Enabled"}},
                 {"Name": "PS2 Status", "Status": {"State": "Absent"}}]}),
+            storage: vec![(
+                json!({"Name": "PERC H730 Mini", "Status": {"Health": "OK", "State": "Enabled"}}),
+                vec![
+                    json!({"Name": "Disk 0", "Model": "ST1200MM0088", "CapacityBytes": 1_200_000_000_000_u64,
+                    "MediaType": "HDD", "Protocol": "SAS", "SerialNumber": "S4001",
+                    "Status": {"Health": "OK", "State": "Enabled"}}),
+                ],
+            )],
             ..Default::default()
         }
     }
@@ -495,7 +554,8 @@ mod tests {
     fn summary_lists_only_populated_parts() {
         let j = summary_json(&sample(), "lab-r630", "192.0.2.10", "2026-10-30 17:00:00");
         assert_eq!(j["system"]["service_tag"], "ABC1234");
-        assert_eq!(j["idrac"]["firmware"], "2.75.75.75");
+        assert_eq!(j["bmc"]["firmware"], "2.75.75.75");
+        assert_eq!(j["bmc_log"]["file"], "lclog.csv");
         assert_eq!(
             j["memory"].as_array().unwrap().len(),
             1,
@@ -514,6 +574,71 @@ mod tests {
             text.contains("iDRAC:         13G Monolithic firmware 2.75.75.75"),
             "{text}"
         );
+        assert!(
+            text.contains("Lifecycle Controller log: newest 0 entries (lclog.csv)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Disk 0: ST1200MM0088 1200.0 GB HDD SAS, serial S4001 [OK]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("PS1 Status:  750 W, firmware  [OK]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn supermicro_summary_uses_the_serial_and_maintenance_log() {
+        let c = Collected {
+            vendor: Vendor::Supermicro,
+            system: json!({"Manufacturer": "Supermicro", "Model": "SYS-2029BT-HNTR",
+                "SKU": "To be filled by O.E.M.", "SerialNumber": "A328789X8A10489",
+                "BiosVersion": "4.3", "PowerState": "On",
+                "Status": {"State": "Enabled", "Health": "OK"}}),
+            manager: json!({"Model": "ASPEED", "FirmwareVersion": "01.74.14"}),
+            power: json!({"PowerSupplies": [{"Name": "Power Supply Bay 1", "Model": "PWS-2K22A-1R",
+                "PowerCapacityWatts": null, "Status": {"State": "Enabled", "Health": "OK"}}]}),
+            aux_log: vec![
+                json!({"Id": "1", "Severity": "OK", "Created": "2018-11-27T23:01:56+00:00",
+                "Message": "SOL was configured enable successfully.",
+                "Oem": {"Supermicro": {"Interface": "KCS", "User": "ADMIN", "Source": "Localhost"}}}),
+            ],
+            ..Default::default()
+        };
+        let j = summary_json(&c, "smc-01", "192.0.2.20", "now");
+        assert_eq!(j["vendor"], "Supermicro");
+        assert_eq!(j["system"]["service_tag"], "A328789X8A10489");
+        assert_eq!(j["bmc"]["kind"], "BMC");
+        assert_eq!(j["bmc_log"]["entries"], 1);
+        let text = summary_text(&j);
+        assert!(!text.contains("Service tag:"), "{text}");
+        assert!(text.contains("Serial:        A328789X8A10489"), "{text}");
+        assert!(
+            text.contains("Power Supply Bay 1: PWS-2K22A-1R, firmware  [OK]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("BMC:           ASPEED firmware 01.74.14"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Maintenance event log: newest 1 entries (maintenance.csv)"),
+            "{text}"
+        );
+        let csv = aux_log_csv(&c.aux_log);
+        assert!(csv.contains("\"ADMIN@KCS\""), "{csv}");
+
+        let bytes = build_zip(&c, "smc-01-x", &j).unwrap();
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
+            .collect();
+        assert!(
+            names.contains(&"smc-01-x/maintenance.csv".to_string()),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n.ends_with("lclog.csv")), "{names:?}");
     }
 
     #[test]
@@ -554,21 +679,26 @@ mod tests {
         );
     }
 
-    /// Against a real iDRAC:
+    /// Against a real BMC:
     /// `RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored export`
-    /// (writes the zip to the system temp dir and prints its summary).
+    /// (writes the zip to the system temp dir and prints its summary). `RUSTDRAC_TEST_VENDOR`
+    /// (`dell` or `supermicro`) skips the vendor probe.
     #[test]
     #[ignore]
-    fn export_from_a_real_idrac() {
+    fn export_from_a_real_bmc() {
         let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
         let host = var("RUSTDRAC_TEST_HOST");
-        let client = crate::idrac::http_client().unwrap();
+        let client = crate::bmc::http_client().unwrap();
+        let vendor = std::env::var("RUSTDRAC_TEST_VENDOR")
+            .ok()
+            .map(|v| Vendor::parse(&v).unwrap_or_else(|| panic!("unknown vendor {v}")));
         let rf = Redfish::new(
             &client,
             &host,
             &var("RUSTDRAC_TEST_USER"),
             &var("RUSTDRAC_TEST_PASSWORD"),
-        );
+        )
+        .with_vendor(vendor);
         let started = std::time::Instant::now();
         let c = collect(
             &rf,

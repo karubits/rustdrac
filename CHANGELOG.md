@@ -4,6 +4,16 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## 2026-11-01
+
+### Added
+- **Supermicro X11 support.** The console tab, address-book autofill, Health & SEL tab, alarm checker and log export now also work with Supermicro X10/X11 BMCs (HTML5 iKVM). The vendor is detected on first contact, saved as `vendor:` in `connections.yaml`, and can be set by hand in the Add/Edit dialog ("BMC type").
+- The address-book column and field "Service Tag" is now "Service Tag / Serial": Supermicro servers show their serial number there.
+
+### Changed
+- Export: the BMC log file is `lclog.csv` on Dell (as before) and `maintenance.csv` on Supermicro. In `summary.json` the `idrac` key is now `bmc` (with `kind`, `model`, `firmware`), `lc_log_entries` is `bmc_log` (`kind`, `entries`, `file`), and there is a `vendor` field.
+- The live export test is `export_from_a_real_bmc`; `RUSTDRAC_TEST_VENDOR=dell|supermicro` skips the vendor probe.
+
 ## 2026-10-31
 
 Now published on GitHub: https://github.com/karubits/rustdrac

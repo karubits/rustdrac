@@ -12,7 +12,9 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::blocking::{Client, RequestBuilder};
 use url::Url;
 
-pub const SESSION_COOKIE: &str = "-http-session-";
+use crate::bmc::{ConsolePage, Cookie};
+
+const SESSION_COOKIE: &str = "-http-session-";
 
 const IDRAC9_SESSION: &str = "/sysmgmt/2015/bmc/session";
 const IDRAC9_VCONSOLE: &str = "/sysmgmt/2015/server/vconsole";
@@ -46,15 +48,6 @@ pub enum Auth {
     },
 }
 
-/// What a console tab loads: the viewer page, a script injected before the page's own
-/// scripts run, and (iDRAC 8) the script the viewer's "Disconnect Viewer" button runs.
-#[derive(Debug, Clone)]
-pub struct ConsolePage {
-    pub url: String,
-    pub script: String,
-    pub disconnect_js: Option<&'static str>,
-}
-
 /// Fields of the XML document returned by `POST /data/login`.
 #[derive(Debug, PartialEq)]
 struct LoginReply {
@@ -74,16 +67,8 @@ pub fn http_client() -> Result<Client> {
         .context("building HTTP client")
 }
 
-/// Which web UI the iDRAC runs, from where `/` redirects to (no credentials needed).
-pub fn detect(client: &Client, host: &str) -> Result<Generation> {
-    let resp = client
-        .get(format!("https://{host}/"))
-        .send()
-        .with_context(|| format!("connecting to https://{host}"))?;
-    Ok(generation_from_path(resp.url().path()))
-}
-
-fn generation_from_path(path: &str) -> Generation {
+/// Which web UI the iDRAC runs, from where `/` redirects to: `/restgui/…` on iDRAC 9.
+pub(crate) fn generation_from_path(path: &str) -> Generation {
     if path.starts_with("/restgui/") {
         Generation::Idrac9
     } else {
@@ -91,8 +76,14 @@ fn generation_from_path(path: &str) -> Generation {
     }
 }
 
-pub fn login(client: &Client, host: &str, user: &str, password: &str) -> Result<Session> {
-    match detect(client, host)? {
+pub fn login(
+    client: &Client,
+    host: &str,
+    user: &str,
+    password: &str,
+    generation: Generation,
+) -> Result<Session> {
+    match generation {
         Generation::Idrac8 => login8(client, host, user, password),
         Generation::Idrac9 => login9(client, host, user, password),
     }
@@ -271,6 +262,7 @@ pub fn console_page(
             Ok(ConsolePage {
                 url: console_url(session, title, lang).to_string(),
                 script: idrac8_opener_shim(&locale),
+                cookies: vec![session_cookie(session)],
                 disconnect_js: Some(IDRAC8_DISCONNECT_JS),
             })
         }
@@ -283,8 +275,18 @@ pub fn console_page(
             let location = reply["Location"]
                 .as_str()
                 .context("the iDRAC returned no console location")?;
-            idrac9_console_page(location)
+            let mut page = idrac9_console_page(location)?;
+            page.cookies.push(session_cookie(session));
+            Ok(page)
         }
+    }
+}
+
+fn session_cookie(session: &Session) -> Cookie {
+    Cookie {
+        name: SESSION_COOKIE.to_string(),
+        value: session.cookie.clone(),
+        http_only: true,
     }
 }
 
@@ -320,48 +322,9 @@ fn idrac9_console_page(location: &str) -> Result<ConsolePage> {
     for (var k in items) sessionStorage.setItem(k, items[k]);
 }})();"#
         ),
+        cookies: vec![],
         disconnect_js: None,
     })
-}
-
-/// What Redfish says about the server behind the iDRAC.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Identity {
-    pub service_tag: String,
-    pub model: String,
-}
-
-impl Identity {
-    /// "idrac-<tag>, <model>", as the web UI titles the console.
-    pub fn title(&self) -> Option<String> {
-        match (self.service_tag.is_empty(), self.model.is_empty()) {
-            (false, false) => Some(format!("idrac-{}, {}", self.service_tag, self.model)),
-            (false, true) => Some(format!("idrac-{}", self.service_tag)),
-            (true, false) => Some(self.model.clone()),
-            (true, true) => None,
-        }
-    }
-}
-
-/// Best-effort service tag and model from Redfish; `None` if Redfish is unavailable.
-pub fn identity(client: &Client, host: &str, user: &str, password: &str) -> Option<Identity> {
-    let sys: serde_json::Value = client
-        .get(format!(
-            "https://{host}/redfish/v1/Systems/System.Embedded.1"
-        ))
-        .basic_auth(user, Some(password))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .ok()?;
-    let identity = Identity {
-        service_tag: sys["SKU"].as_str().unwrap_or_default().to_string(),
-        model: sys["Model"].as_str().unwrap_or_default().to_string(),
-    };
-    identity.title().map(|_| identity)
 }
 
 /// The URL the iDRAC web UI opens when "Launch Virtual Console" is clicked.
@@ -572,5 +535,23 @@ mod tests {
         }
         assert!(page.disconnect_js.is_none());
         assert!(idrac9_console_page("https://h/restgui/vconsole/index.html?ip=h").is_err());
+    }
+
+    #[test]
+    fn the_web_view_gets_the_session_cookie() {
+        let session = Session {
+            host: "192.0.2.10".into(),
+            user: "root".into(),
+            cookie: "0123456789abcdef".into(),
+            auth: Auth::Idrac9 { xsrf: "x".into() },
+        };
+        assert_eq!(
+            session_cookie(&session),
+            Cookie {
+                name: "-http-session-".into(),
+                value: "0123456789abcdef".into(),
+                http_only: true,
+            }
+        );
     }
 }
