@@ -3,16 +3,20 @@
   Render the winget manifests for a release and submit them to microsoft/winget-pkgs.
 
   scripts/winget-submit.ps1 -Version 0.4.0 -InstallerSha256 <sha256> -Token <github PAT>
-  scripts/winget-submit.ps1 -Version 0.4.0 -InstallerSha256 <sha256>            # render only
+  scripts/winget-submit.ps1 -Version 0.4.0 -InstallerSha256 <sha256> -Submit   # log in interactively
+  scripts/winget-submit.ps1 -Version 0.4.0 -InstallerSha256 <sha256>           # render only
 
-  The token is a classic GitHub PAT with the public_repo scope; wingetcreate pushes a branch
-  to the token owner's fork of microsoft/winget-pkgs (created on first use) and opens the
-  pull request. The release assets must already be public: winget validation downloads them.
+  The token is a classic GitHub PAT with the public_repo scope (CI keeps it in the
+  WINGET_TOKEN secret); without one, -Submit lets wingetcreate sign you in to GitHub in the
+  browser. wingetcreate pushes a branch to your fork of microsoft/winget-pkgs (created on
+  first use) and opens the pull request. The release assets must already be public: winget
+  validation downloads them.
 #>
 param(
   [Parameter(Mandatory)][string]$Version,
   [Parameter(Mandatory)][string]$InstallerSha256,
   [string]$Token = "",
+  [switch]$Submit,
   [string]$OutDir = "build/winget"
 )
 $ErrorActionPreference = "Stop"
@@ -40,9 +44,10 @@ if (-not (Test-Path $wc) -or (Get-FileHash $wc -Algorithm SHA256).Hash -ne $wcSh
   if ($got -ne $wcSha256.ToUpper()) { throw "wingetcreate checksum mismatch: $got" }
 }
 
-if ($Token -eq "") {
-  Write-Host "No token: not submitting. Validate with: winget validate --manifest $dir"
+if ($Token -eq "" -and -not $Submit) {
+  Write-Host "Not submitting (no -Token or -Submit). Validate with: winget validate --manifest $dir"
   exit 0
 }
-& $wc submit --token $Token --prtitle "New version: karubits.RustDrac version $Version" $dir
+$auth = if ($Token -ne "") { @("--token", $Token) } else { @() }
+& $wc submit @auth --prtitle "New version: karubits.RustDrac version $Version" $dir
 if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed with exit code $LASTEXITCODE" }
