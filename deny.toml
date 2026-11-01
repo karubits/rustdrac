@@ -9,6 +9,12 @@ all-features = true
 version = 2
 yanked = "deny"
 unmaintained = "workspace"
+ignore = [
+  # glib 0.18's VariantStrIter is unsound; the app never iterates variant string arrays
+  # (it builds variants for the D-Bus notification only). The GTK 3 bindings (gtk 0.18)
+  # pin glib 0.18 and have no newer release, so this cannot be upgraded away.
+  { id = "RUSTSEC-2024-0429", reason = "VariantStrIter is not used; gtk 0.18 pins glib 0.18" },
+]
 
 [licenses]
 # Everything here is compatible with shipping Rust Drac under MIT.
