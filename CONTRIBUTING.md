@@ -8,7 +8,7 @@ request makes it better.
 Open an [issue](https://github.com/karubits/rustdrac/issues). For bugs, please include:
 - the Rust Drac version (**Menu → About Rust Drac**, or `rustdrac --version`);
 - the BMC (iDRAC 8, iDRAC 9 or Supermicro X11) and its firmware version, and the server model;
-- your distro, and whether you use the AppImage or a source build;
+- your OS (distro, or Windows version) and whether you use the AppImage, the Windows installer or a source build;
 - what you did, what you expected and what happened. Output from `RUSTDRAC_DEBUG=1 rustdrac …`
   often helps.
 

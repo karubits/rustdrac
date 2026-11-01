@@ -53,7 +53,7 @@ const BASE_CSS: &str = r#"
 @define-color accent_hover #f07a43;
 @define-color danger #d21419;
 
-* { font-family: "Roboto", "Noto Sans", "Cantarell", sans-serif; }
+* { font-family: "Roboto", "Noto Sans", "Cantarell", "Segoe UI", sans-serif; }
 
 headerbar .title { font-weight: 700; }
 headerbar .subtitle { color: @accent; opacity: 1; }

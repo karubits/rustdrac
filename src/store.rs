@@ -1,4 +1,5 @@
-//! The address book: `~/.config/rustdrac/connections.yaml`.
+//! The address book: `~/.config/rustdrac/connections.yaml` (`%APPDATA%\rustdrac\connections.yaml`
+//! on Windows).
 //!
 //! ```yaml
 //! defaults:
@@ -21,7 +22,8 @@
 //! ```
 //!
 //! The file is plain YAML so it can be copied between machines. Passwords are never written
-//! to it: when `save_password` is set they live in the desktop keyring (Secret Service),
+//! to it: when `save_password` is set they live in the desktop keyring (Secret Service on
+//! Linux, the Credential Manager on Windows),
 //! keyed by the connection `id`.
 
 use std::path::{Path, PathBuf};
@@ -183,10 +185,10 @@ pub fn path() -> PathBuf {
     config_path("rustdrac")
 }
 
-/// `/home/me/.config/…` as `~/.config/…`.
+/// `/home/me/.config/…` as `~/.config/…` (`C:\Users\me\…` as `~\…`).
 pub fn display_path(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
-        Some(rel) => format!("~/{}", rel.display()),
+        Some(rel) => format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display()),
         None => path.display().to_string(),
     }
 }
@@ -195,9 +197,9 @@ fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// `~/x` as `/home/me/x`; anything else unchanged.
+/// `~/x` (or `~\x`) as `/home/me/x`; anything else unchanged.
 pub fn expand_home(dir: &str) -> PathBuf {
-    match dir.strip_prefix("~/") {
+    match dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\")) {
         Some(rel) => home_dir().join(rel),
         None => PathBuf::from(dir),
     }
@@ -437,7 +439,10 @@ mod tests {
 
         let home = home_dir();
         store.set_screenshot_dir(&home.join("Shots").display().to_string());
-        assert_eq!(store.defaults.screenshot_dir.as_deref(), Some("~/Shots"));
+        assert_eq!(
+            store.defaults.screenshot_dir.as_deref(),
+            Some(format!("~{}Shots", std::path::MAIN_SEPARATOR).as_str())
+        );
         assert_eq!(store.screenshot_dir(), home.join("Shots"));
         store.set_screenshot_dir("~/Other ");
         assert_eq!(store.screenshot_dir(), home.join("Other"));

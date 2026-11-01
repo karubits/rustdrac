@@ -2007,6 +2007,8 @@ dependencies = [
  "cairo-rs",
  "clap",
  "dirs",
+ "gio",
+ "glib",
  "gtk",
  "javascriptcore-rs",
  "keyring",

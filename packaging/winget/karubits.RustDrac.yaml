@@ -1,0 +1,7 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+# Template: scripts/winget-submit.ps1 fills in __VERSION__ and submits the three files.
+PackageIdentifier: karubits.RustDrac
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0

@@ -4,7 +4,15 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
-## 2026-11-01
+## 2026-11-01 (v0.4.0)
+
+### Added
+- **Windows build.** A per-user installer (`rustdrac-<version>-x86_64-setup.exe`, also on winget as `karubits.RustDrac`) and a portable zip. The GTK 3 interface is the same; the console is shown in Microsoft Edge WebView2 (the runtime ships with Windows 11 and current Windows 10; the installer fetches it otherwise), passwords are stored in the Credential Manager and health alarms arrive as Windows notifications. The address book lives in `%APPDATA%\rustdrac\connections.yaml`.
+
+### Changed
+- The toast at the bottom of the window ("Screenshot saved", "Export finished") no longer floats over the page; the page makes room for it while it is shown.
+
+## 2026-11-01 (v0.3.0)
 
 ### Added
 - **Supermicro X11 support.** The console tab, address-book autofill, Health & SEL tab, alarm checker and log export now also work with Supermicro X10/X11 BMCs (HTML5 iKVM). The vendor is detected on first contact, saved as `vendor:` in `connections.yaml`, and can be set by hand in the Add/Edit dialog ("BMC type").
