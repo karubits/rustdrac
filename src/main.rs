@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod bmc;
 mod console;
 mod export;
@@ -9,6 +11,8 @@ mod store;
 mod supermicro;
 mod theme;
 mod webview;
+#[cfg(windows)]
+mod win;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -58,6 +62,9 @@ struct Cli {
 }
 
 fn main() {
+    #[cfg(windows)]
+    win::startup();
+    #[cfg(unix)]
     use_software_gl_without_gpu();
     let cli = Cli::parse();
     // Matches the .desktop file's StartupWMClass so docks group the window with its launcher.
@@ -452,7 +459,7 @@ impl App {
                 "A native app for Dell iDRAC 8/9 and Supermicro X11 servers: the HTML5 virtual console \
                  in tabs, an address book, a health and System Event Log viewer and a \
                  background alarm checker.\n\n\
-                 Made with Rust 🦀, GTK 3 and WebKitGTK.\n\n\
+                 Made with Rust 🦀, GTK 3 and WebKitGTK (WebView2 on Windows).\n\n\
                  Rust Drac is free software. Contributions are welcome: report a bug or \
                  suggest a feature in GitHub Issues, or fork the repository and open a pull \
                  request (see Credits for the links).",
@@ -1112,6 +1119,7 @@ impl App {
 /// Without a GPU render node (VMs without a virtual GPU, containers) WebKit's web process
 /// stalls initialising GL and the console page never loads. Mesa's software renderer
 /// (llvmpipe) avoids that. A value the user set is kept.
+#[cfg(unix)]
 fn use_software_gl_without_gpu() {
     let has_render_node = std::fs::read_dir("/dev/dri")
         .map(|dir| {
@@ -1194,13 +1202,7 @@ impl Toast {
         let f = folder.clone();
         open.connect_clicked(move |_| {
             if let Some(dir) = f.borrow().as_ref() {
-                let uri = gtk::gio::File::for_path(dir).uri();
-                if let Err(e) = gtk::gio::AppInfo::launch_default_for_uri(
-                    &uri,
-                    None::<&gtk::gio::AppLaunchContext>,
-                ) {
-                    eprintln!("rustdrac: opening {}: {e}", dir.display());
-                }
+                open_folder(dir);
             }
         });
         let r = revealer.clone();
@@ -1252,7 +1254,32 @@ fn now_hms() -> String {
         .unwrap_or_default()
 }
 
+/// The file manager on `dir`.
+#[cfg(unix)]
+fn open_folder(dir: &std::path::Path) {
+    let uri = gtk::gio::File::for_path(dir).uri();
+    if let Err(e) =
+        gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>)
+    {
+        eprintln!("rustdrac: opening {}: {e}", dir.display());
+    }
+}
+
+#[cfg(windows)]
+fn open_folder(dir: &std::path::Path) {
+    win::open_folder(dir);
+}
+
+/// Desktop notification: a Windows toast.
+#[cfg(windows)]
+fn notify(summary: &str, body: &str, health: Health) {
+    if let Err(e) = win::notify(summary, body, health == Health::Critical) {
+        eprintln!("rustdrac: desktop notification: {e:#}");
+    }
+}
+
 /// Desktop notification over the freedesktop D-Bus API (works on KDE and GNOME).
+#[cfg(unix)]
 fn notify(summary: &str, body: &str, health: Health) {
     let Ok(bus) =
         gtk::gio::bus_get_sync(gtk::gio::BusType::Session, None::<&gtk::gio::Cancellable>)

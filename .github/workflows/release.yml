@@ -1,7 +1,8 @@
 # Release: push a tag vX.Y.Z (scripts/release.sh does it) and this builds the AppImage and
-# tarball, then publishes a release with them and SHA256SUMS. The release notes are the
-# newest CHANGELOG.md section. Draft first, files attached, then published, so "latest"
-# never points at a release without its downloads.
+# tarball (Linux) and the installer and portable zip (Windows), then publishes a release
+# with them and SHA256SUMS. The release notes are the newest CHANGELOG.md section. Draft
+# first, files attached, then published, so "latest" never points at a release without its
+# downloads. Finally the winget manifest is submitted (needs the WINGET_TOKEN secret).
 name: Release
 run-name: Release ${{ inputs.tag || github.ref_name }}
 
@@ -61,8 +62,8 @@ jobs:
       - name: Release notes (the newest CHANGELOG.md section)
         run: |
           awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 > dist/NOTES.md
-          printf '\n---\nDownload **rustdrac-%s-x86_64.AppImage**, `chmod +x` it and run it. Check it against `SHA256SUMS`.\n' \
-            "$VERSION" >> dist/NOTES.md
+          printf '\n---\nLinux: download **rustdrac-%s-x86_64.AppImage**, `chmod +x` it and run it.\nWindows: run **rustdrac-%s-x86_64-setup.exe** (or `winget install karubits.RustDrac`), or unzip the portable build.\nCheck downloads against `SHA256SUMS`.\n' \
+            "$VERSION" "$VERSION" >> dist/NOTES.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,16 +71,57 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - name: MSYS2 with GTK 3 and Rust
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd
+            mingw-w64-x86_64-librsvg zip
+      - name: Tests
+        run: cargo test --locked
+      - name: Build installer and portable zip
+        run: scripts/build-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: dist/
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write # creates the release
+    outputs:
+      installer_sha256: ${{ steps.sums.outputs.installer_sha256 }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-windows
+          path: dist
+      - name: Merge checksums
+        id: sums
+        run: |
+          cat dist/SHA256SUMS.windows >> dist/SHA256SUMS && rm dist/SHA256SUMS.windows
+          echo "installer_sha256=$(awk '/-setup\.exe$/ { print $1 }' dist/SHA256SUMS)" >> "$GITHUB_OUTPUT"
+          cat dist/SHA256SUMS
       - name: Create draft release, attach files, publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,6 +136,27 @@ jobs:
           case $TAG in *-*) prerelease=--prerelease ;; esac
           gh release create "$TAG" --verify-tag --draft $prerelease \
             --title "Rust Drac $TAG" --notes-file dist/NOTES.md \
-            dist/*.AppImage dist/*.tar.gz dist/SHA256SUMS
+            dist/*.AppImage dist/*.tar.gz dist/*-setup.exe dist/*-windows.zip dist/SHA256SUMS
           gh release edit "$TAG" --draft=false
           gh release view "$TAG" --json url,assets --jq '"Released \(.url) with \(.assets | length) files"'
+
+  winget:
+    # Opens the pull request on microsoft/winget-pkgs. Skipped for pre-releases and until
+    # the WINGET_TOKEN secret (a classic PAT with public_repo, owner of a winget-pkgs fork)
+    # exists.
+    needs: publish
+    if: ${{ !contains(inputs.tag || github.ref_name, '-') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Render and submit the manifest
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          INSTALLER_SHA256: ${{ needs.publish.outputs.installer_sha256 }}
+        run: |
+          if (-not $env:WINGET_TOKEN) { Write-Host "WINGET_TOKEN is not set; skipping the winget submission"; exit 0 }
+          scripts/winget-submit.ps1 -Version $env:TAG -InstallerSha256 $env:INSTALLER_SHA256 -Token $env:WINGET_TOKEN

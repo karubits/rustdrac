@@ -4,7 +4,7 @@
 
 # Rust Drac
 
-**A fast, native Linux app for Dell iDRAC 8 & 9 and Supermicro X11 servers. Made with Rust 🦀**
+**A fast, native Linux and Windows app for Dell iDRAC 8 & 9 and Supermicro X11 servers. Made with Rust 🦀**
 
 Virtual console in tabs · address book · health & SEL viewer · background alarms.<br>
 No browser, no Java, no login page, no certificate warnings.
@@ -18,6 +18,7 @@ No browser, no Java, no login page, no certificate warnings.
 [![Rust 1.88+](https://img.shields.io/badge/rustc-1.88%2B-dea584?logo=rust&logoColor=white)](Cargo.toml)
 [![GTK 3](https://img.shields.io/badge/GTK-3-4a86cf?logo=gnome&logoColor=white)](https://www.gtk.org/)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux%20x86--64-informational?logo=linux&logoColor=white)](#download)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-informational?logo=windows&logoColor=white)](#windows)
 [![iDRAC 8 | 9](https://img.shields.io/badge/Dell%20iDRAC-8%20%7C%209-0076ce?logo=dell&logoColor=white)](#how-it-works)
 [![Supermicro X11](https://img.shields.io/badge/Supermicro-X11-1b5e20)](#supermicro-x11)
 
@@ -51,7 +52,20 @@ chmod +x rustdrac-*-x86_64.AppImage
 
 The AppImage bundles GTK 3 and WebKitGTK and runs on x86-64 Linux with glibc 2.36 or newer: Debian 12+, Ubuntu 23.04+, Fedora 37+, Arch and similar. Each release also has:
 - a plain `…-x86_64-linux.tar.gz` (the binary only; it needs `webkit2gtk-4.1` installed);
-- `SHA256SUMS`, to verify either download.
+- the Windows installer and portable zip (below);
+- `SHA256SUMS`, to verify any download.
+
+### Windows
+
+```powershell
+winget install karubits.RustDrac
+```
+
+or run **`rustdrac-<version>-x86_64-setup.exe`** from the [Releases](../../releases/latest) page. It installs for the current user (no administrator rights) with a Start-menu entry, and `…-x86_64-windows.zip` is the same build as a portable folder: unzip anywhere and run `rustdrac.exe`.
+
+- Windows 10 (1809+) or 11, x64. The console uses the Microsoft Edge WebView2 Runtime, which Windows 11 and up-to-date Windows 10 already have; the installer fetches it otherwise.
+- The build is not code-signed, so SmartScreen shows an "unknown publisher" prompt the first time the installer runs (**More info → Run anyway**). `winget` and `SHA256SUMS` let you verify what you got.
+- Passwords go to the Windows Credential Manager; the address book is `%APPDATA%\rustdrac\connections.yaml`; screenshots land in `Pictures\Rust Drac`.
 
 ## Usage
 
@@ -117,7 +131,7 @@ iDRAC 8 Redfish is slow: each request takes about 5s plus a ~4s TLS handshake (i
 
 ### Config file
 
-`~/.config/rustdrac/connections.yaml` (set `RUSTDRAC_CONFIG` to use another file). A config from the old `~/.config/idrac-console/` is migrated automatically. It's plain YAML, so you can copy it between machines or edit it by hand:
+`~/.config/rustdrac/connections.yaml` on Linux, `%APPDATA%\rustdrac\connections.yaml` on Windows (set `RUSTDRAC_CONFIG` to use another file). A config from the old `~/.config/idrac-console/` is migrated automatically. It's plain YAML, so you can copy it between machines or edit it by hand:
 
 ```yaml
 defaults:
@@ -164,7 +178,7 @@ The app first checks which web UI the BMC runs, from where `/` redirects (`/star
 ### iDRAC 8
 
 1. **Login.** `POST /data/login` returns the ST1/ST2 tokens and the session cookie. The app then reads the per-login `aimSession` id and the virtual-media privilege, and downloads the viewer's string table (`locale/locale_en.json`).
-2. **Viewer.** `virtualconsolehtml5.html` opens in an embedded WebKitGTK view. Certificate errors are ignored, and each tab is ephemeral and isolated, so nothing is written to disk.
+2. **Viewer.** `virtualconsolehtml5.html` opens in an embedded web view (WebKitGTK on Linux, WebView2 on Windows). Certificate errors are ignored, and each tab is ephemeral and isolated, so nothing is written to disk.
 3. **Shim.** Dell's viewer expects the iDRAC web UI to have opened it, so a small injected script provides two stand-ins:
    - the opener window the viewer reads its strings from (`window.opener.top.localeObj`);
    - the certificate popup for the KVM port `:5900`, which the viewer waits on before it connects.
@@ -182,12 +196,14 @@ Note: the iDRAC 8 only serves gzip-compressed static files, so a client that doe
 ### Supermicro X11
 
 1. **Login.** `POST /cgi/login.cgi` with the user and password base64-encoded (as the login page's own script does on recent firmware; older X10/X11 firmware posts them plain, and the app checks the login page to tell), which sets the `SID` cookie.
-2. **Viewer.** `/cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap` is the HTML5 iKVM (noVNC): a self-contained page the web UI opens in a popup, carrying a one-time KVM token and opening a `wss://` WebSocket on port 443. It opens in an embedded WebKitGTK view with the session cookie. If the session is gone, the BMC serves a "session timed out" stub instead; a small injected script makes that readable rather than bouncing to the login form.
+2. **Viewer.** `/cgi/url_redirect.cgi?url_name=man_ikvm_html5_bootstrap` is the HTML5 iKVM (noVNC): a self-contained page the web UI opens in a popup, carrying a one-time KVM token and opening a `wss://` WebSocket on port 443. It opens in the embedded web view with the session cookie. If the session is gone, the BMC serves a "session timed out" stub instead; a small injected script makes that readable rather than bouncing to the login form.
 3. **Closing.** The page is unloaded, which closes the KVM socket, then `GET /cgi/logout.cgi` ends the web session.
 
 Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query string is answered with a redirect and then HTTP 501, so the app reads collections member by member there. The SEL is `Systems/1/LogServices/Log1`; the maintenance event log (`Managers/1/LogServices/Log1`) takes the place of Dell's Lifecycle log in the export.
 
 ## Build from source
+
+### Linux
 
 Requires Rust 1.88+ and the GTK 3 / WebKitGTK 4.1 development files:
 - Debian/Ubuntu: `sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libdbus-1-dev` (or run `scripts/ci-deps.sh`)
@@ -212,6 +228,21 @@ scripts/install-tools.sh linuxdeploy appimagetool
 scripts/build-appimage.sh
 ```
 
+### Windows
+
+The Windows build keeps the GTK 3 interface and shows the console in Microsoft WebView2 instead of WebKitGTK (`src/webview/`). It is built with [MSYS2](https://www.msys2.org/) (`winget install MSYS2.MSYS2`); in a **MINGW64** shell:
+
+```sh
+pacman -S mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf \
+          mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd \
+          mingw-w64-x86_64-librsvg zip
+cargo build --release   # -> target/release/rustdrac.exe (needs WebView2Loader.dll next to it, see below)
+cargo test
+scripts/build-windows.sh   # installer + portable zip into dist/; needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`)
+```
+
+`scripts/build-windows.sh` collects the exe, `WebView2Loader.dll` (unpacked by the `webview2-com-sys` crate under `target/`), the MinGW DLLs it needs, the PNG and SVG pixbuf loaders, the Adwaita icons, the GSettings schemas and `packaging/windows/settings.ini` into a self-contained folder, then runs `packaging/windows/rustdrac.iss`. The winget manifest templates are in `packaging/winget/`; `scripts/winget-submit.ps1` fills them in and (with a token) opens the pull request on `microsoft/winget-pkgs`, which the release workflow does for every non-pre-release tag once the `WINGET_TOKEN` secret exists.
+
 ## Development
 
 Every push and pull request runs these checks in CI (`.github/workflows/ci.yml`):
@@ -221,6 +252,7 @@ Every push and pull request runs these checks in CI (`.github/workflows/ci.yml`)
 | Formatting | `cargo fmt --check` |
 | Lints, warnings are errors | `cargo clippy --all-targets -- -D warnings` |
 | Tests | `cargo test` |
+| Windows build: clippy and tests under MSYS2 (`windows-latest`) | `cargo clippy`, `cargo test` |
 | Dependencies: RustSec advisories, licences (MIT-compatible only), bans, sources | `cargo-deny` (`deny.toml`) |
 | Secrets in the full git history and working tree | gitleaks **and** betterleaks (`.gitleaks.toml`) |
 | Shell scripts | shellcheck |
@@ -250,7 +282,7 @@ Versions follow [SemVer](https://semver.org/): patch for fixes, minor for new fe
 | Variable | Effect |
 |---|---|
 | `RUSTDRAC_CONFIG=<file>` | Use another address-book file |
-| `RUSTDRAC_DEVTOOLS=1` | Enables the WebKit inspector (right click → Inspect) |
+| `RUSTDRAC_DEVTOOLS=1` | Enables the WebKit inspector / WebView2 DevTools (right click → Inspect) |
 | `RUSTDRAC_DEBUG=1` | Logs each console HTTP request and its status, plus JS console output |
 | `RUSTDRAC_AUTOCLOSE=<secs>` | Closes the window after N seconds, disconnecting every console |
 | `RUSTDRAC_SNAPSHOT=<file.png>` | With AUTOCLOSE, saves a PNG of the current tab before closing |
@@ -278,4 +310,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the details.
 
 [MIT](LICENSE) © Karubits
 
-<div align="center"><sub>Made with Rust 🦀, GTK and WebKitGTK. Not affiliated with Dell Technologies or Super Micro Computer, Inc.; iDRAC and PowerEdge are trademarks of Dell Inc., Supermicro of Super Micro Computer, Inc.</sub></div>
+<div align="center"><sub>Made with Rust 🦀, GTK, WebKitGTK and WebView2. Not affiliated with Dell Technologies or Super Micro Computer, Inc.; iDRAC and PowerEdge are trademarks of Dell Inc., Supermicro of Super Micro Computer, Inc.</sub></div>

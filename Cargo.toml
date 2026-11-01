@@ -19,6 +19,9 @@ base64 = "0.23.1"
 cairo-rs = { version = "0.18", features = ["png"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
+# The same GLib API level on every platform (on Linux webkit2gtk pulls these in anyway).
+gio = { version = "0.18", features = ["v2_70"] }
+glib = { version = "0.18", features = ["v2_70"] }
 gtk = "0.18"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json", "cookies", "gzip"] }
@@ -39,6 +42,7 @@ keyring = { version = "3", features = ["windows-native"] }
 webview2-com = "0.39"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_System_Com",
   "Win32_System_Console",
   "Win32_System_Registry",

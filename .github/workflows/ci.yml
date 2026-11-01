@@ -60,6 +60,30 @@ jobs:
           bin/betterleaks git --redact --no-banner --config .gitleaks.toml .
           bin/betterleaks dir --redact --no-banner --config .gitleaks.toml .
 
+  windows:
+    name: Windows (clippy, test)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: MSYS2 with GTK 3 and Rust
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd
+            mingw-w64-x86_64-librsvg zip
+      - name: clippy (warnings are errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: tests
+        run: cargo test --locked
+
   scripts:
     name: Shell scripts (shellcheck)
     runs-on: ubuntu-latest
