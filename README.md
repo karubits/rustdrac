@@ -230,12 +230,12 @@ scripts/build-appimage.sh
 
 ### Windows
 
-The Windows build keeps the GTK 3 interface and shows the console in Microsoft WebView2 instead of WebKitGTK (`src/webview/`). It is built with [MSYS2](https://www.msys2.org/) (`winget install MSYS2.MSYS2`); in a **MINGW64** shell:
+The Windows build keeps the GTK 3 interface and shows the console in Microsoft WebView2 instead of WebKitGTK (`src/webview/`). It is built with [MSYS2](https://www.msys2.org/) (`winget install MSYS2.MSYS2`); in a **UCRT64** shell:
 
 ```sh
-pacman -S mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf \
-          mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd \
-          mingw-w64-x86_64-librsvg zip
+pacman -S mingw-w64-ucrt-x86_64-gtk3 mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-pkgconf \
+          mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils mingw-w64-ucrt-x86_64-ntldd \
+          mingw-w64-ucrt-x86_64-librsvg zip
 cargo build --release   # -> target/release/rustdrac.exe (needs WebView2Loader.dll next to it, see below)
 cargo test
 scripts/build-windows.sh   # installer + portable zip into dist/; needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`)

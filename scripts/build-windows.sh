@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Windows release artefacts into dist/ (run from an MSYS2 MINGW64 shell):
+# Build the Windows release artefacts into dist/ (run from an MSYS2 UCRT64 shell):
 #   rustdrac-<version>-x86_64-setup.exe      per-user installer (Inno Setup)
 #   rustdrac-<version>-x86_64-windows.zip    portable: unzip anywhere, run rustdrac.exe
 #   SHA256SUMS.windows
@@ -13,7 +13,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-[ "${MSYSTEM:-}" = MINGW64 ] || { echo "run this from an MSYS2 MINGW64 shell" >&2; exit 1; }
+[ "${MSYSTEM:-}" = UCRT64 ] || { echo "run this from an MSYS2 UCRT64 shell" >&2; exit 1; }
 version=${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)}
 version=${version#v}
 stage="$root/build/windows"
@@ -41,10 +41,11 @@ cp "$mingw/$loaders/libpixbufloader-png.dll" "$mingw/$loaders/pixbufloader_svg.d
 (cd "$mingw/$loaders" && gdk-pixbuf-query-loaders libpixbufloader-png.dll pixbufloader_svg.dll) \
   > "$app/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
 
-# Every MinGW DLL the exe and the loaders pull in, transitively.
+# Every MSYS2 DLL the exe and the loaders pull in, transitively (system DLLs stay out).
 echo "==> Collecting DLLs"
+prefix_w=$(cygpath -w "$mingw")
 ntldd -R "$app/rustdrac.exe" "$app/$loaders"/*.dll \
-  | awk '/=>/ { print $3 }' | grep -i "mingw64" | sort -u \
+  | awk '/=>/ { print $3 }' | grep -iF "$prefix_w" | sort -u \
   | while IFS= read -r dll; do cp "$(cygpath -u "$dll")" "$app/"; done
 ls "$app"/*.dll | wc -l | xargs echo "    DLLs:"
 

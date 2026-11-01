@@ -33,7 +33,7 @@ jobs:
     # systems with the same or newer glibc.
     container: node:22-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -65,7 +65,7 @@ jobs:
           printf '\n---\nLinux: download **rustdrac-%s-x86_64.AppImage**, `chmod +x` it and run it.\nWindows: run **rustdrac-%s-x86_64-setup.exe** (or `winget install karubits.RustDrac`), or unzip the portable build.\nCheck downloads against `SHA256SUMS`.\n' \
             "$VERSION" "$VERSION" >> dist/NOTES.md
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/
@@ -77,24 +77,24 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
       - name: MSYS2 with GTK 3 and Rust
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd
-            mingw-w64-x86_64-librsvg zip
+            mingw-w64-ucrt-x86_64-gtk3 mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils mingw-w64-ucrt-x86_64-ntldd
+            mingw-w64-ucrt-x86_64-librsvg zip
       - name: Tests
         run: cargo test --locked
       - name: Build installer and portable zip
         run: scripts/build-windows.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: dist-windows
           path: dist/
@@ -108,11 +108,11 @@ jobs:
     outputs:
       installer_sha256: ${{ steps.sums.outputs.installer_sha256 }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: dist
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: dist-windows
           path: dist
@@ -148,7 +148,7 @@ jobs:
     if: ${{ !contains(inputs.tag || github.ref_name, '-') }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}

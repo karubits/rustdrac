@@ -26,7 +26,7 @@ jobs:
     # Debian 12: the oldest supported base, same as the release build.
     container: node:22-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Build dependencies and toolchain
@@ -46,7 +46,7 @@ jobs:
     name: Secret scanning (gitleaks, betterleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # full history: a leak in an old commit still counts
           persist-credentials: false
@@ -67,18 +67,18 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: MSYS2 with GTK 3 and Rust
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gtk3 mingw-w64-x86_64-rust mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-ntldd
-            mingw-w64-x86_64-librsvg zip
+            mingw-w64-ucrt-x86_64-gtk3 mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils mingw-w64-ucrt-x86_64-ntldd
+            mingw-w64-ucrt-x86_64-librsvg zip
       - name: clippy (warnings are errors)
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: tests
@@ -88,7 +88,7 @@ jobs:
     name: Shell scripts (shellcheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - run: shellcheck -S warning scripts/*.sh
