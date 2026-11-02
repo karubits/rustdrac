@@ -4,7 +4,7 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
-## 2026-11-02
+## 2026-11-02 (v0.4.1)
 
 ### Added
 - Console tabs show the server's model, service tag / serial and BMC address above the viewer. Click a value to copy it; the copy button next to them copies all three.
