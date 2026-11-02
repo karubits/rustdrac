@@ -89,7 +89,7 @@ The first tab is an address book:
 - **Vendor, service tag (Supermicro: serial number) and model** are filled in automatically from Redfish the first time you connect.
 - **Quick Connect** opens a one-off console, which you can optionally add to the address book.
 
-Each console opens in its own tab. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button (iDRAC) or exit hotkey (Supermicro). Either way the app first disconnects the KVM the way the viewer's own button does, then logs out. Without this an iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
+Each console opens in its own tab. A strip above the viewer shows the server's model, service tag or serial and the BMC address; click any of them to copy it, or the copy button for all three on one line. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button (iDRAC) or exit hotkey (Supermicro). Either way the app first disconnects the KVM the way the viewer's own button does, then logs out. Without this an iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
 
 ![Virtual console in a tab](docs/screenshots/console.png)
 

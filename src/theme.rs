@@ -118,6 +118,11 @@ paned > separator { min-height: 8px; background: none; }
 .app-toast button { color: #eceeef; }
 
 .manager-footer { font-size: 0.9em; opacity: 0.6; }
+
+.console-info { padding: 1px 6px; border-bottom: 1px solid alpha(@borders, 0.7); }
+.console-info button { padding: 1px 8px; min-height: 22px; }
+.console-info .caption { font-size: 0.9em; opacity: 0.65; }
+.console-info .value { font-weight: 600; }
 .empty-title { font-size: 1.6em; font-weight: 300; }
 .empty-hint { opacity: 0.6; }
 .empty-icon { color: @accent; }

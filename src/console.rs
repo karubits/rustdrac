@@ -69,10 +69,116 @@ struct Inner {
     tab: gtk::Box,
     webview: RefCell<Option<ConsoleView>>,
     service_tag: RefCell<String>,
+    /// The page: the info strip above the stack.
+    page: gtk::Box,
+    model: Chip,
+    serial: Chip,
+    address: Chip,
+    vendor: gtk::Label,
 }
 
 #[derive(Clone)]
 pub struct ConsoleTab(Rc<Inner>);
+
+/// One "Model  PowerEdge R630" item of the info strip: a flat button whose click copies
+/// the value and says "copied" in its place for a moment.
+#[derive(Clone)]
+struct Chip(Rc<ChipInner>);
+
+struct ChipInner {
+    button: gtk::Button,
+    caption: gtk::Label,
+    value: gtk::Label,
+    /// Shows the value or "copied", without changing width.
+    pages: gtk::Stack,
+    text: RefCell<String>,
+    flash: RefCell<Option<glib::SourceId>>,
+}
+
+const COPIED_FLASH: Duration = Duration::from_millis(1500);
+
+impl Chip {
+    fn new(caption: &str) -> Chip {
+        let caption = gtk::Label::new(Some(caption));
+        caption.style_context().add_class("caption");
+        let value = gtk::Label::new(None);
+        value.style_context().add_class("value");
+        let copied = gtk::Label::new(Some("copied"));
+        copied.style_context().add_class("caption");
+        let pages = gtk::Stack::new();
+        pages.set_homogeneous(true);
+        pages.add_named(&value, "value");
+        pages.add_named(&copied, "copied");
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        content.add(&caption);
+        content.add(&pages);
+        let button = gtk::Button::new();
+        button.add(&content);
+        button.set_relief(gtk::ReliefStyle::None);
+        // The console keeps the keyboard.
+        button.set_focus_on_click(false);
+        button.set_tooltip_text(Some("Click to copy"));
+        let chip = Chip(Rc::new(ChipInner {
+            button,
+            caption,
+            value,
+            pages,
+            text: RefCell::new(String::new()),
+            flash: RefCell::new(None),
+        }));
+        let weak = Rc::downgrade(&chip.0);
+        chip.0.button.connect_clicked(move |_| {
+            if let Some(inner) = weak.upgrade() {
+                Chip(inner).copy();
+            }
+        });
+        chip
+    }
+
+    fn button(&self) -> &gtk::Button {
+        &self.0.button
+    }
+
+    fn text(&self) -> String {
+        self.0.text.borrow().clone()
+    }
+
+    fn set_caption(&self, caption: &str) {
+        self.0.caption.set_text(caption);
+    }
+
+    /// Shows the chip with `text`, or hides it when there is nothing to show.
+    fn set(&self, text: &str) {
+        *self.0.text.borrow_mut() = text.to_string();
+        self.0.value.set_text(text);
+        self.0.button.set_visible(!text.is_empty());
+    }
+
+    fn copy(&self) {
+        let text = self.text();
+        if text.is_empty() {
+            return;
+        }
+        gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&text);
+        self.flash_copied();
+    }
+
+    /// Says "copied" in place of the value for a moment.
+    fn flash_copied(&self) {
+        self.0.pages.set_visible_child_name("copied");
+        if let Some(id) = self.0.flash.borrow_mut().take() {
+            id.remove();
+        }
+        let weak = Rc::downgrade(&self.0);
+        let id = glib::timeout_add_local_once(COPIED_FLASH, move || {
+            if let Some(inner) = weak.upgrade() {
+                inner.flash.borrow_mut().take();
+                inner.pages.set_visible_child_name("value");
+            }
+        });
+        *self.0.flash.borrow_mut() = Some(id);
+    }
+}
 
 /// Debugging aid: every canvas with its size, on-screen box and a few sampled pixels.
 const CANVAS_INVENTORY_JS: &str = r##"(function () {
@@ -173,6 +279,28 @@ impl ConsoleTab {
         tab.add(&tab_close);
         tab.show_all();
 
+        // Info strip: model, serial and BMC address, each copied with a click.
+        let model = Chip::new("Model");
+        let serial = Chip::new("Serial");
+        let address = Chip::new("BMC");
+        address.set(&target.host);
+        let copy_all = gtk::Button::from_icon_name(Some("edit-copy-symbolic"), gtk::IconSize::Menu);
+        copy_all.set_relief(gtk::ReliefStyle::None);
+        copy_all.set_focus_on_click(false);
+        copy_all.set_tooltip_text(Some("Copy model, serial and address"));
+        let vendor = gtk::Label::new(None);
+        vendor.style_context().add_class("caption");
+        let info = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        info.style_context().add_class("console-info");
+        for chip in [&model, &serial, &address] {
+            info.add(chip.button());
+        }
+        info.add(&copy_all);
+        info.pack_end(&vendor, false, false, 6);
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        page.pack_start(&info, false, false, 0);
+        page.pack_start(&stack, true, true, 0);
+
         let this = ConsoleTab(Rc::new(Inner {
             title: RefCell::new(target.name.clone()),
             target,
@@ -188,8 +316,19 @@ impl ConsoleTab {
             tab,
             webview: RefCell::new(None),
             service_tag: RefCell::new(String::new()),
+            page,
+            model,
+            serial,
+            address,
+            vendor,
         }));
 
+        let weak = this.downgrade();
+        copy_all.connect_clicked(move |_| {
+            if let Some(tab) = upgrade(&weak) {
+                tab.copy_all();
+            }
+        });
         let weak = this.downgrade();
         retry.connect_clicked(move |_| {
             if let Some(tab) = upgrade(&weak) {
@@ -205,13 +344,39 @@ impl ConsoleTab {
             });
         }
 
-        this.0.stack.show_all();
+        this.0.page.show_all();
+        // Unknown until Redfish answers.
+        this.0.model.set("");
+        this.0.serial.set("");
         this.connect();
         this
     }
 
     pub fn widget(&self) -> gtk::Widget {
-        self.0.stack.clone().upcast()
+        self.0.page.clone().upcast()
+    }
+
+    /// Fills the info strip from what Redfish said.
+    fn show_identity(&self, identity: &bmc::Identity) {
+        self.0.model.set(&identity.model);
+        self.0.serial.set_caption(match identity.vendor {
+            bmc::Vendor::Dell => "Service Tag",
+            bmc::Vendor::Supermicro => "Serial",
+        });
+        self.0.serial.set(&identity.service_tag);
+        self.0.address.set_caption(identity.vendor.bmc_name());
+        self.0.vendor.set_text(identity.vendor.label());
+    }
+
+    /// "PowerEdge R630, 76G2F42, 10.2.31.211" (whatever is known) to the clipboard.
+    fn copy_all(&self) {
+        let parts: Vec<String> = [&self.0.model, &self.0.serial, &self.0.address]
+            .iter()
+            .map(|c| c.text())
+            .filter(|t| !t.is_empty())
+            .collect();
+        gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&parts.join(", "));
+        self.0.address.flash_copied();
     }
 
     pub fn tab_widget(&self) -> gtk::Widget {
@@ -331,6 +496,7 @@ impl ConsoleTab {
             Ok(c) => {
                 if let Some(identity) = &c.identity {
                     *self.0.service_tag.borrow_mut() = identity.service_tag.clone();
+                    self.show_identity(identity);
                     (self.0.hooks.on_identity)(&self.0.target, identity);
                 }
                 let title = c
