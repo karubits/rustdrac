@@ -118,7 +118,7 @@ All of this uses Redfish with basic auth, so it doesn't take one of the BMC's fe
 - **Health & SEL tab** (toolbar, right-click menu or `--health`). It shows:
   - the overall state;
   - every component (system, CPUs, memory, PSUs, voltages, fans, temperatures, storage controllers and drives), with an *Only show problems* filter;
-  - the full SEL, with a severity filter, search, **Export SEL…** (CSV) and **Clear SEL…** (asks first).
+  - the full SEL, with a severity filter, search, **Export SEL…** (CSV) and **Clear SEL…** (asks first). Select entries and press Ctrl+C, or right-click for **Copy Line**, **Copy Message** and **Copy All Shown**; lines are tab-separated, so they paste into a spreadsheet or a ticket as they are.
 
   When the health rollup is in alarm but every component reads OK (a CPU machine-check error, for example), the SEL events that explain it are listed with the components.
 - **Alarm checker**: the manager's Health column shows each server's state. **Check All** runs it now; it also runs at start-up and every `defaults.health_check_minutes` (default 15, 0 = off).

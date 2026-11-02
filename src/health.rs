@@ -62,6 +62,11 @@ struct Inner {
     search: gtk::SearchEntry,
     sel_count: gtk::Label,
     sel_model: gtk::ListStore,
+    sel_view: gtk::TreeView,
+    /// Entries behind the rows of `sel_model`, in row order.
+    shown: RefCell<Vec<SelEntry>>,
+    /// Restores the entry count after a "copied" flash.
+    count_flash: RefCell<Option<glib::SourceId>>,
     report: RefCell<Option<HealthReport>>,
     sel: RefCell<Vec<SelEntry>>,
     pending: std::cell::Cell<u8>,
@@ -137,6 +142,7 @@ impl HealthTab {
             ],
         );
         sel_view.set_tooltip_column(S_MESSAGE as i32);
+        sel_view.selection().set_mode(gtk::SelectionMode::Multiple);
         let severity = gtk::ComboBoxText::new();
         severity.append(Some("all"), "All severities");
         severity.append(Some("warning"), "Warning and critical");
@@ -203,6 +209,9 @@ impl HealthTab {
             search,
             sel_count,
             sel_model,
+            sel_view,
+            shown: RefCell::new(Vec::new()),
+            count_flash: RefCell::new(None),
             report: RefCell::new(None),
             sel: RefCell::new(Vec::new()),
             pending: std::cell::Cell::new(0),
@@ -228,6 +237,33 @@ impl HealthTab {
         this.0
             .search
             .connect_search_changed(move |_| with(&t, |t| t.show_sel()));
+
+        // Right click: copy menu (the row under the pointer joins the selection first).
+        let t = this.downgrade();
+        this.0.sel_view.connect_button_press_event(move |view, ev| {
+            if ev.button() != 3 || ev.event_type() != gtk::gdk::EventType::ButtonPress {
+                return glib::Propagation::Proceed;
+            }
+            let (x, y) = ev.position();
+            if let Some((Some(path), ..)) = view.path_at_pos(x as i32, y as i32)
+                && !view.selection().path_is_selected(&path)
+            {
+                view.selection().unselect_all();
+                view.selection().select_path(&path);
+            }
+            with(&t, |t| t.sel_menu(ev));
+            glib::Propagation::Stop
+        });
+        // Ctrl+C copies the selected lines.
+        let t = this.downgrade();
+        this.0.sel_view.connect_key_press_event(move |_, ev| {
+            let ctrl = ev.state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if ctrl && matches!(ev.keyval().to_unicode(), Some('c' | 'C')) {
+                with(&t, |t| t.copy_selected_lines());
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
 
         this.refresh();
         this
@@ -491,6 +527,12 @@ impl HealthTab {
                 ],
             );
         }
+        *self.0.shown.borrow_mut() = entries;
+        self.show_sel_count();
+    }
+
+    fn show_sel_count(&self) {
+        let shown = self.0.shown.borrow().len();
         let total = self.0.sel.borrow().len();
         let alarms = self
             .0
@@ -499,11 +541,93 @@ impl HealthTab {
             .iter()
             .filter(|e| e.severity.is_alarm())
             .count();
-        self.0.sel_count.set_text(&if entries.len() == total {
+        self.0.sel_count.set_text(&if shown == total {
             format!("{total} entries, {alarms} warning/critical")
         } else {
-            format!("{} of {total} entries", entries.len())
+            format!("{shown} of {total} entries")
         });
+    }
+
+    /// The entries of the selected rows, in display order.
+    fn selected_entries(&self) -> Vec<SelEntry> {
+        let (rows, _) = self.0.sel_view.selection().selected_rows();
+        let shown = self.0.shown.borrow();
+        rows.iter()
+            .filter_map(|p| p.indices().first().copied())
+            .filter_map(|i| shown.get(i as usize).cloned())
+            .collect()
+    }
+
+    fn sel_menu(&self, ev: &gtk::gdk::EventButton) {
+        let selected = self.selected_entries().len();
+        let shown = self.0.shown.borrow().len();
+        let menu = gtk::Menu::new();
+        let item = |label: String, enabled: bool, f: Box<dyn Fn(&HealthTab)>| {
+            let mi = gtk::MenuItem::with_label(&label);
+            mi.set_sensitive(enabled);
+            let t = self.clone();
+            mi.connect_activate(move |_| f(&t));
+            menu.append(&mi);
+        };
+        let lines = if selected > 1 {
+            format!("Copy {selected} Lines")
+        } else {
+            "Copy Line".to_string()
+        };
+        item(lines, selected > 0, Box::new(|t| t.copy_selected_lines()));
+        item(
+            "Copy Message".to_string(),
+            selected > 0,
+            Box::new(|t| {
+                let text: Vec<String> = t
+                    .selected_entries()
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect();
+                t.copy(&text.join("\n"), text.len(), "message");
+            }),
+        );
+        item(
+            format!("Copy All Shown ({shown})"),
+            shown > 0,
+            Box::new(|t| {
+                let shown = t.0.shown.borrow();
+                let text = std::iter::once(SEL_HEADER.to_string())
+                    .chain(shown.iter().map(sel_line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                t.copy(&text, shown.len(), "line");
+            }),
+        );
+        menu.show_all();
+        menu.popup_at_pointer(Some(ev));
+    }
+
+    fn copy_selected_lines(&self) {
+        let lines: Vec<String> = self.selected_entries().iter().map(sel_line).collect();
+        if !lines.is_empty() {
+            self.copy(&lines.join("\n"), lines.len(), "line");
+        }
+    }
+
+    /// Puts `text` on the clipboard and says so in place of the entry count for a moment.
+    fn copy(&self, text: &str, count: usize, what: &str) {
+        gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(text);
+        let plural = if count == 1 { "" } else { "s" };
+        self.0
+            .sel_count
+            .set_text(&format!("copied {count} {what}{plural}"));
+        if let Some(id) = self.0.count_flash.borrow_mut().take() {
+            id.remove();
+        }
+        let weak = self.downgrade();
+        let id = glib::timeout_add_local_once(std::time::Duration::from_millis(1800), move || {
+            with(&weak, |t| {
+                t.0.count_flash.borrow_mut().take();
+                t.show_sel_count();
+            });
+        });
+        *self.0.count_flash.borrow_mut() = Some(id);
     }
 
     fn export(&self) {
@@ -595,6 +719,21 @@ fn with(weak: &Weak<Inner>, f: impl FnOnce(&HealthTab)) {
     }
 }
 
+/// Header for "Copy All Shown"; the columns of [`sel_line`].
+const SEL_HEADER: &str = "Date\tSeverity\tEvent\tSensor\tMessage";
+
+/// One SEL entry as a tab-separated line, as shown in the list.
+fn sel_line(e: &SelEntry) -> String {
+    format!(
+        "{}\t{}\t{}\t{}\t{}",
+        pretty_time(&e.created),
+        e.severity.label(),
+        e.event,
+        e.sensor,
+        e.message
+    )
+}
+
 /// "2026-10-30T02:03:59+09:00" -> "2026-10-30 02:03:59 +09:00"
 fn pretty_time(s: &str) -> String {
     match s.split_once('T') {
@@ -666,6 +805,28 @@ fn list_view(model: &gtk::ListStore, columns: &[(&str, u32, i32, bool)]) -> gtk:
 
 #[cfg(test)]
 mod tests {
+    use crate::redfish::{Health, SelEntry};
+
+    #[test]
+    fn copied_lines_are_tab_separated() {
+        let e = SelEntry {
+            id: 7,
+            created: "2026-11-01T19:57:46-06:00".into(),
+            severity: Health::Critical,
+            message: "CPU 1 machine check error detected.".into(),
+            sensor: "Processor".into(),
+            event: "Transition to Non-recoverable".into(),
+        };
+        assert_eq!(
+            super::sel_line(&e),
+            "2026-11-01 19:57:46 -06:00\tCritical\tTransition to Non-recoverable\tProcessor\tCPU 1 machine check error detected."
+        );
+        assert_eq!(
+            super::SEL_HEADER.split('\t').count(),
+            super::sel_line(&e).split('\t').count()
+        );
+    }
+
     #[test]
     fn pretty_time() {
         assert_eq!(

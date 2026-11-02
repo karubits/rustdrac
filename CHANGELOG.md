@@ -4,6 +4,11 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## 2026-11-02
+
+### Added
+- Health & SEL: SEL entries can be copied. Select one or more (Shift/Ctrl-click) and press Ctrl+C, or right-click for **Copy Line**, **Copy Message** and **Copy All Shown** (the filtered list with a header). Lines are tab-separated.
+
 ## 2026-11-01 (v0.4.0)
 
 ### Added
