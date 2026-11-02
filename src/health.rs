@@ -26,12 +26,16 @@ pub struct Target {
 }
 
 type ReportHook = Box<dyn Fn(&Target, &Result<HealthReport, String>)>;
+/// Asks for another user name and password for this target; `None` if cancelled.
+pub type CredentialsHook = Box<dyn Fn(&Target) -> Option<(String, String)>>;
 type PageHook = Box<dyn Fn(&gtk::Widget)>;
 
 pub struct Hooks {
     /// A fresh health report (or the error), so the address book's alarm column can update.
     pub on_report: ReportHook,
     pub on_closed: PageHook,
+    /// The login was rejected and the user wants to enter other credentials.
+    pub on_credentials: CredentialsHook,
 }
 
 // Component list columns.
@@ -58,6 +62,8 @@ struct Inner {
     by_ip: gtk::Button,
     ip: RefCell<Option<String>>,
     retry: gtk::Button,
+    /// "Change Password…": shown when the login was rejected.
+    password: gtk::Button,
     tab: gtk::Box,
     tab_spinner: gtk::Spinner,
     overall: gtk::Label,
@@ -188,9 +194,12 @@ impl HealthTab {
         retry.style_context().add_class("suggested-action");
         let by_ip = gtk::Button::with_label("Connect by IP Address");
         by_ip.set_no_show_all(true);
+        let password = gtk::Button::with_label("Change Password…");
+        password.set_no_show_all(true);
         let error_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         error_buttons.add(&retry);
         error_buttons.add(&by_ip);
+        error_buttons.add(&password);
         let error_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
         error_box.set_valign(gtk::Align::Start);
         error_box.add(&error);
@@ -232,6 +241,7 @@ impl HealthTab {
             by_ip,
             ip: RefCell::new(None),
             retry: retry.clone(),
+            password,
             tab,
             tab_spinner,
             overall,
@@ -260,6 +270,10 @@ impl HealthTab {
         this.0
             .by_ip
             .connect_clicked(move |_| with(&t, |t| t.connect_by_ip()));
+        let t = this.downgrade();
+        this.0
+            .password
+            .connect_clicked(move |_| with(&t, |t| t.change_credentials()));
         let t = this.downgrade();
         export.connect_clicked(move |_| with(&t, |t| t.export()));
         let t = this.downgrade();
@@ -483,6 +497,24 @@ impl HealthTab {
             .style_context()
             .remove_class("suggested-action");
         self.0.retry.style_context().add_class("suggested-action");
+        let auth = crate::bmc::is_auth_failure(e);
+        self.0.password.set_visible(auth);
+        if auth {
+            // Another password is the likely fix, not Retry.
+            self.0
+                .retry
+                .style_context()
+                .remove_class("suggested-action");
+            self.0
+                .password
+                .style_context()
+                .add_class("suggested-action");
+        } else {
+            self.0
+                .password
+                .style_context()
+                .remove_class("suggested-action");
+        }
         self.0.body.set_visible_child_name("error");
         let rejected = e
             .chain()
@@ -524,6 +556,19 @@ impl HealthTab {
                 }
             });
         });
+    }
+
+    /// Ask for other credentials and read again with them.
+    fn change_credentials(&self) {
+        let Some((user, password)) = (self.0.hooks.on_credentials)(&self.target()) else {
+            return;
+        };
+        {
+            let mut target = self.0.target.borrow_mut();
+            target.user = user;
+            target.password = password;
+        }
+        self.refresh();
     }
 
     /// Read again from the IP address the button names (the tab keeps its name).

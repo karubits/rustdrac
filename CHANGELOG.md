@@ -8,6 +8,7 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 
 ### Added
 - Console tabs have a power button showing the server's power state, with **Power On**, **Graceful Shutdown**, **Force Off**, **Reset**, **Graceful Restart** and **Power Cycle** (Redfish `ComputerSystem.Reset`). Only actions the BMC offers are enabled, everything but Power On asks first, and the state is read back afterwards.
+- A rejected login ("invalid username or password") on a console or Health tab shows a **Change Password…** button: enter another user name and password and connect again. For an address-book entry the new user name is saved and the password can be saved to the keyring.
 
 ### Changed
 - Saving a password where no keyring is reachable (WSL, a bare X session, SSH: no Secret Service on the session bus) now explains that and how to get one, and offers to go on without saving: connect, add or edit the server with the password kept for the session only.

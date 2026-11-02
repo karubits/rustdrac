@@ -801,7 +801,7 @@ impl App {
         let Some((user, password)) = self.credentials(conn.clone(), user, password) else {
             return;
         };
-        let (w1, w2) = (self.downgrade(), self.downgrade());
+        let (w1, w2, w3) = (self.downgrade(), self.downgrade(), self.downgrade());
         let tab = HealthTab::open(
             health::Target {
                 name: conn.display_name().to_string(),
@@ -822,6 +822,11 @@ impl App {
                         Err(e) => Check::Failed(e.clone()),
                     };
                     app.manager().set_check(id, check);
+                }),
+                on_credentials: Box::new(move |t| {
+                    upgrade(&w3).and_then(|app| {
+                        app.reauth(&t.name, &t.host, &t.user, t.connection_id.as_deref())
+                    })
                 }),
                 on_closed: Box::new(move |page| {
                     let Some(app) = upgrade(&w2) else { return };
@@ -994,8 +999,70 @@ impl App {
         });
     }
 
+    /// Other credentials for a tab whose login was rejected: a dialog with the user name
+    /// and password (and, for an address-book entry, whether to save it). `None` if
+    /// cancelled.
+    fn reauth(
+        &self,
+        name: &str,
+        host: &str,
+        user: &str,
+        connection_id: Option<&str>,
+    ) -> Option<(String, String)> {
+        let conn = connection_id.and_then(|id| self.0.store.borrow().get(id).cloned());
+        let (user, password, remember) =
+            credentials_dialog(&self.0.window, name, host, user, conn.as_ref())?;
+        let Some(mut conn) = conn else {
+            return Some((user, password));
+        };
+        conn.user = user.clone();
+        conn.save_password = remember;
+        let mut stored = if remember {
+            conn.set_saved_password(&password)
+        } else {
+            conn.forget_password();
+            Ok(())
+        };
+        if let Err(e) = &stored
+            && let Some(k) = store::keyring_unavailable(e)
+        {
+            if !question_dialog(
+                Some(&self.0.window),
+                k.summary(),
+                &format!(
+                    "{}\n\nConnect without saving the password? It is kept for this session.",
+                    k.details()
+                ),
+                "Connect",
+            ) {
+                return None;
+            }
+            conn.save_password = false;
+            stored = Ok(());
+        }
+        let saved = stored.and_then(|()| {
+            let mut store = self.0.store.borrow_mut();
+            store.upsert(conn.clone());
+            store.save()
+        });
+        if let Err(e) = saved {
+            error_dialog(Some(&self.0.window), &format!("{e:#}"));
+        }
+        self.0
+            .session_passwords
+            .borrow_mut()
+            .insert(conn.id.clone(), password.clone());
+        self.manager().refresh();
+        Some((user, password))
+    }
+
     fn open(&self, target: Target) {
-        let (w1, w2, w3) = (self.downgrade(), self.downgrade(), self.downgrade());
+        let (w1, w2, w3, w4) = (
+            self.downgrade(),
+            self.downgrade(),
+            self.downgrade(),
+            self.downgrade(),
+        );
         let tab = ConsoleTab::open(
             target,
             self.0.client.clone(),
@@ -1009,6 +1076,11 @@ impl App {
                     if let Some(app) = upgrade(&w2) {
                         app.tab_closed(page);
                     }
+                }),
+                on_credentials: Box::new(move |t| {
+                    upgrade(&w4).and_then(|app| {
+                        app.reauth(&t.name, &t.host, &t.user, t.connection_id.as_deref())
+                    })
                 }),
                 on_title: Box::new(move |page, title| {
                     let Some(app) = upgrade(&w3) else { return };
@@ -1443,6 +1515,51 @@ fn password_entry() -> gtk::Entry {
 }
 
 /// Ask for the password of a saved connection. Returns (password, remember).
+/// After a rejected login: user name, password and (for an address-book entry) whether to
+/// save the password; `None` if cancelled.
+fn credentials_dialog(
+    parent: &gtk::Window,
+    name: &str,
+    host: &str,
+    user: &str,
+    conn: Option<&Connection>,
+) -> Option<(String, String, bool)> {
+    let dialog = form_dialog(parent, &format!("Log in to {name}"));
+    let grid = form_grid();
+    let info = gtk::Label::new(Some(&format!("{host} rejected the user name or password.")));
+    info.set_xalign(0.0);
+    let user_entry = gtk::Entry::builder()
+        .text(user)
+        .activates_default(true)
+        .build();
+    let password = password_entry();
+    let remember = gtk::CheckButton::with_label("Save password in the system keyring");
+    remember.set_active(conn.is_some_and(|c| c.save_password));
+    form_row(&grid, 0, "", &info);
+    form_row(&grid, 1, "User", &user_entry);
+    form_row(&grid, 2, "Password", &password);
+    if conn.is_some() {
+        form_row(&grid, 3, "", &remember);
+    }
+    dialog.content_area().add(&grid);
+    dialog.show_all();
+    password.grab_focus();
+    let result = loop {
+        if dialog.run() != gtk::ResponseType::Ok {
+            break None;
+        }
+        let user = user_entry.text().trim().to_string();
+        if user.is_empty() {
+            user_entry.grab_focus();
+            continue;
+        }
+        break Some((user, password.text().to_string(), remember.is_active()));
+    };
+    // SAFETY: the dialog is not used after this point.
+    unsafe { dialog.destroy() };
+    result
+}
+
 fn password_dialog(parent: &gtk::Window, conn: &Connection, user: &str) -> Option<(String, bool)> {
     let dialog = form_dialog(parent, &format!("Connect to {}", conn.display_name()));
     let grid = form_grid();

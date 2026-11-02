@@ -69,6 +69,10 @@ pub fn login(
             host: host.to_string(),
             sid,
         }),
+        _ if body.contains("STR42_2") => Err(crate::bmc::AuthFailed {
+            host: host.to_string(),
+        }
+        .into()),
         _ => bail!("{host}: {}", login_error(&body)),
     }
 }

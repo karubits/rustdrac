@@ -163,6 +163,25 @@ fn platform_from(final_path: &str, body: &str) -> Platform {
     }
 }
 
+/// The BMC rejected the user name or password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFailed {
+    pub host: String,
+}
+
+impl std::fmt::Display for AuthFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: invalid username or password", self.host)
+    }
+}
+
+impl std::error::Error for AuthFailed {}
+
+/// Whether `e` is (or wraps) a rejected login, so the user can be asked for another password.
+pub fn is_auth_failure(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<AuthFailed>().is_some())
+}
+
 /// An authenticated web session on a BMC.
 #[derive(Debug, Clone)]
 pub enum Session {

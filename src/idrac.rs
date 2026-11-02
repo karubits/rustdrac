@@ -12,7 +12,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::blocking::{Client, RequestBuilder};
 use url::Url;
 
-use crate::bmc::{ConsolePage, Cookie};
+use crate::bmc::{AuthFailed, ConsolePage, Cookie};
 
 const SESSION_COOKIE: &str = "-http-session-";
 
@@ -227,6 +227,12 @@ fn login8(client: &Client, host: &str, user: &str, password: &str) -> Result<Ses
     }
     let reply = parse_login_reply(&body)?;
 
+    if reply.auth_result == 1 && reply.blocking_time == 0 {
+        return Err(AuthFailed {
+            host: host.to_string(),
+        }
+        .into());
+    }
     if reply.auth_result != 0 {
         let mut msg = match reply.auth_result {
             1 => "invalid username or password".to_string(),
@@ -312,6 +318,13 @@ fn login9(client: &Client, host: &str, user: &str, password: &str) -> Result<Ses
     let reply: serde_json::Value =
         serde_json::from_str(&body).with_context(|| format!("unexpected login reply: {body}"))?;
     let auth_result = reply["authResult"].as_i64().unwrap_or(-1);
+    let blocked = reply["blockingTime"].as_u64().unwrap_or(0);
+    if auth_result == 1 && blocked == 0 {
+        return Err(AuthFailed {
+            host: host.to_string(),
+        }
+        .into());
+    }
     if auth_result != 0 {
         let msg = match auth_result {
             1 => "invalid username or password".to_string(),
@@ -320,7 +333,6 @@ fn login9(client: &Client, host: &str, user: &str, password: &str) -> Result<Ses
             10 | 12 | 13 => "two-factor authentication is not supported yet".to_string(),
             n => format!("login rejected (authResult {n})"),
         };
-        let blocked = reply["blockingTime"].as_u64().unwrap_or(0);
         let msg = if blocked > 0 {
             format!("{msg} — login blocked for {blocked}s")
         } else {

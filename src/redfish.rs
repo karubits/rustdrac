@@ -288,10 +288,12 @@ impl Redfish {
         let status = resp.status();
         match status.as_u16() {
             401 => {
-                return Err(GetError::Fatal(anyhow::anyhow!(
-                    "{}: invalid username or password",
-                    self.host
-                )));
+                return Err(GetError::Fatal(
+                    bmc::AuthFailed {
+                        host: self.host.clone(),
+                    }
+                    .into(),
+                ));
             }
             403 => {
                 return Err(GetError::Fatal(anyhow::anyhow!(

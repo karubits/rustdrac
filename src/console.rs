@@ -45,6 +45,8 @@ pub struct Target {
 }
 
 type IdentityHook = Box<dyn Fn(&Target, &bmc::Identity)>;
+/// Asks for another user name and password for this target; `None` if cancelled.
+pub type CredentialsHook = Box<dyn Fn(&Target) -> Option<(String, String)>>;
 type PageHook = Box<dyn Fn(&gtk::Widget)>;
 type TitleHook = Box<dyn Fn(&gtk::Widget, &str)>;
 
@@ -55,6 +57,8 @@ pub struct Hooks {
     pub on_closed: PageHook,
     /// The window title for this tab changed.
     pub on_title: TitleHook,
+    /// The login was rejected and the user wants to enter other credentials.
+    pub on_credentials: CredentialsHook,
 }
 
 enum State {
@@ -82,6 +86,8 @@ struct Inner {
     retry: gtk::Button,
     /// "Connect by IP address": shown when the BMC refused the host name.
     by_ip: gtk::Button,
+    /// "Change Password…": shown when the login was rejected.
+    password: gtk::Button,
     /// What that button connects to.
     ip: RefCell<Option<String>>,
     spinner: gtk::Spinner,
@@ -279,10 +285,13 @@ impl ConsoleTab {
         let close = gtk::Button::with_label("Close Tab");
         let by_ip = gtk::Button::with_label("Connect by IP Address");
         by_ip.set_no_show_all(true);
+        let password = gtk::Button::with_label("Change Password…");
+        password.set_no_show_all(true);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         buttons.set_halign(gtk::Align::Center);
         buttons.add(&retry);
         buttons.add(&by_ip);
+        buttons.add(&password);
         buttons.add(&close);
         let failed = centered_box();
         failed.add(&gtk::Image::from_icon_name(
@@ -378,6 +387,7 @@ impl ConsoleTab {
             error,
             retry: retry.clone(),
             by_ip,
+            password,
             ip: RefCell::new(None),
             spinner,
             tab_label,
@@ -436,6 +446,12 @@ impl ConsoleTab {
         this.0.by_ip.connect_clicked(move |_| {
             if let Some(tab) = upgrade(&weak) {
                 tab.connect_by_ip();
+            }
+        });
+        let weak = this.downgrade();
+        this.0.password.connect_clicked(move |_| {
+            if let Some(tab) = upgrade(&weak) {
+                tab.change_credentials();
             }
         });
         for button in [&close, &tab_close] {
@@ -794,6 +810,23 @@ impl ConsoleTab {
             .style_context()
             .remove_class("suggested-action");
         self.0.retry.style_context().add_class("suggested-action");
+        self.0.password.set_visible(bmc::is_auth_failure(e));
+        if bmc::is_auth_failure(e) {
+            // Another password is the likely fix, not Retry.
+            self.0
+                .retry
+                .style_context()
+                .remove_class("suggested-action");
+            self.0
+                .password
+                .style_context()
+                .add_class("suggested-action");
+        } else {
+            self.0
+                .password
+                .style_context()
+                .remove_class("suggested-action");
+        }
         self.0.stack.set_visible_child_name("error");
         let rejected = e
             .chain()
@@ -858,6 +891,19 @@ impl ConsoleTab {
         self.0.address.set(&ip);
         self.0.target.borrow_mut().host = ip;
         self.0.by_ip.hide();
+        self.connect();
+    }
+
+    /// Ask for other credentials and connect again with them.
+    fn change_credentials(&self) {
+        let Some((user, password)) = (self.0.hooks.on_credentials)(&self.target()) else {
+            return;
+        };
+        {
+            let mut target = self.0.target.borrow_mut();
+            target.user = user;
+            target.password = password;
+        }
         self.connect();
     }
 

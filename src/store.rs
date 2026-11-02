@@ -176,7 +176,13 @@ impl Connection {
     pub fn forget_password(&self) {
         if let Ok(entry) = keyring_entry(&self.id) {
             match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                // Nothing saved, or nowhere it could have been saved.
+                Ok(())
+                | Err(
+                    keyring::Error::NoEntry
+                    | keyring::Error::PlatformFailure(_)
+                    | keyring::Error::NoStorageAccess(_),
+                ) => {}
                 Err(e) => eprintln!("rustdrac: removing saved password: {e}"),
             }
         }
