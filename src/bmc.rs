@@ -1,6 +1,7 @@
 //! The vendor-neutral face of a BMC: which family a host belongs to, the web session that
 //! runs its HTML5 console, and the server's identity from Redfish. Dell specifics live in
-//! [`crate::idrac`], Supermicro specifics in [`crate::supermicro`].
+//! [`crate::idrac`], Supermicro specifics in [`crate::supermicro`], AMI MegaRAC (Gigabyte)
+//! specifics in [`crate::megarac`].
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -11,6 +12,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::idrac::{self, Generation};
+use crate::megarac;
 use crate::redfish;
 use crate::supermicro;
 
@@ -24,16 +26,19 @@ pub enum Vendor {
     #[default]
     Dell,
     Supermicro,
+    /// AMI MegaRAC SP-X, as on Gigabyte servers.
+    MegaRac,
 }
 
 impl Vendor {
-    pub const ALL: [Vendor; 2] = [Vendor::Dell, Vendor::Supermicro];
+    pub const ALL: [Vendor; 3] = [Vendor::Dell, Vendor::Supermicro, Vendor::MegaRac];
 
     /// The YAML / combo-box id.
     pub fn id(self) -> &'static str {
         match self {
             Vendor::Dell => "dell",
             Vendor::Supermicro => "supermicro",
+            Vendor::MegaRac => "megarac",
         }
     }
 
@@ -45,6 +50,7 @@ impl Vendor {
         match self {
             Vendor::Dell => "Dell iDRAC",
             Vendor::Supermicro => "Supermicro",
+            Vendor::MegaRac => "AMI MegaRAC",
         }
     }
 
@@ -52,7 +58,7 @@ impl Vendor {
     pub fn bmc_name(self) -> &'static str {
         match self {
             Vendor::Dell => "iDRAC",
-            Vendor::Supermicro => "BMC",
+            Vendor::Supermicro | Vendor::MegaRac => "BMC",
         }
     }
 
@@ -61,6 +67,7 @@ impl Vendor {
         match self {
             Vendor::Dell => "Lifecycle Controller log",
             Vendor::Supermicro => "Maintenance event log",
+            Vendor::MegaRac => "Audit log",
         }
     }
 
@@ -68,6 +75,7 @@ impl Vendor {
         match self {
             Vendor::Dell => "lclog.csv",
             Vendor::Supermicro => "maintenance.csv",
+            Vendor::MegaRac => "audit.csv",
         }
     }
 
@@ -76,6 +84,7 @@ impl Vendor {
         match self {
             Vendor::Dell => "root",
             Vendor::Supermicro => "ADMIN",
+            Vendor::MegaRac => "admin",
         }
     }
 }
@@ -88,6 +97,8 @@ pub enum Platform {
     Supermicro {
         base64_login: bool,
     },
+    /// The AMI MegaRAC SP-X web UI.
+    MegaRac,
 }
 
 impl Platform {
@@ -95,6 +106,7 @@ impl Platform {
         match self {
             Platform::Idrac(_) => Vendor::Dell,
             Platform::Supermicro { .. } => Vendor::Supermicro,
+            Platform::MegaRac => Vendor::MegaRac,
         }
     }
 }
@@ -150,7 +162,8 @@ pub fn cached_vendor(host: &str) -> Option<Vendor> {
 }
 
 /// iDRAC 9 redirects `/` to `/restgui/…`; a Supermicro BMC serves its login form (which posts
-/// to `/cgi/login.cgi`) at `/`; anything else is treated as an iDRAC 8, as before.
+/// to `/cgi/login.cgi`) at `/`; a MegaRAC serves its single-page app, titled "MegaRAC SP-X";
+/// anything else is treated as an iDRAC 8, as before.
 fn platform_from(final_path: &str, body: &str) -> Platform {
     if final_path.starts_with("/restgui/") {
         Platform::Idrac(Generation::Idrac9)
@@ -158,6 +171,8 @@ fn platform_from(final_path: &str, body: &str) -> Platform {
         Platform::Supermicro {
             base64_login: body.contains("btoa"),
         }
+    } else if body.contains("MegaRAC") {
+        Platform::MegaRac
     } else {
         Platform::Idrac(idrac::generation_from_path(final_path))
     }
@@ -187,6 +202,7 @@ pub fn is_auth_failure(e: &anyhow::Error) -> bool {
 pub enum Session {
     Dell(idrac::Session),
     Supermicro(supermicro::Session),
+    MegaRac(megarac::Session),
 }
 
 impl Session {
@@ -194,6 +210,7 @@ impl Session {
         match self {
             Session::Dell(_) => Vendor::Dell,
             Session::Supermicro(_) => Vendor::Supermicro,
+            Session::MegaRac(_) => Vendor::MegaRac,
         }
     }
 
@@ -201,6 +218,7 @@ impl Session {
         match self {
             Session::Dell(s) => &s.host,
             Session::Supermicro(s) => &s.host,
+            Session::MegaRac(s) => &s.host,
         }
     }
 }
@@ -244,8 +262,10 @@ impl Identity {
             (_, true, false) => Some(model.to_string()),
             (Vendor::Dell, false, true) => Some(format!("idrac-{tag}")),
             (Vendor::Dell, false, false) => Some(format!("idrac-{tag}, {model}")),
-            (Vendor::Supermicro, false, true) => Some(format!("S/N {tag}")),
-            (Vendor::Supermicro, false, false) => Some(format!("{model}, S/N {tag}")),
+            (Vendor::Supermicro | Vendor::MegaRac, false, true) => Some(format!("S/N {tag}")),
+            (Vendor::Supermicro | Vendor::MegaRac, false, false) => {
+                Some(format!("{model}, S/N {tag}"))
+            }
         }
     }
 }
@@ -258,6 +278,7 @@ pub fn login(client: &Client, host: &str, user: &str, password: &str) -> Result<
         Platform::Supermicro { base64_login } => {
             supermicro::login(client, host, user, password, base64_login).map(Session::Supermicro)
         }
+        Platform::MegaRac => megarac::login(client, host, user, password).map(Session::MegaRac),
     }
 }
 
@@ -265,6 +286,7 @@ pub fn logout(client: &Client, session: &Session) -> Result<()> {
     match session {
         Session::Dell(s) => idrac::logout(client, s),
         Session::Supermicro(s) => supermicro::logout(client, s),
+        Session::MegaRac(s) => megarac::logout(client, s),
     }
 }
 
@@ -278,38 +300,52 @@ pub fn console_page(
     match session {
         Session::Dell(s) => idrac::console_page(client, s, title, lang),
         Session::Supermicro(s) => Ok(supermicro::console_page(s)),
+        Session::MegaRac(s) => Ok(megarac::console_page(client, s)),
     }
 }
 
-/// Best-effort identity from Redfish (one basic-auth request); `None` if Redfish is
-/// unavailable or says nothing useful.
+/// Best-effort identity from Redfish (one request, plus the reset types from `ActionInfo`
+/// where the system document leaves them out); `None` if Redfish is unavailable or says
+/// nothing useful. A MegaRAC's Redfish has no usable serial number, so the model and serial
+/// come from its web API through the session instead.
 pub fn identity(
     client: &Client,
-    host: &str,
+    session: &Session,
     user: &str,
     password: &str,
-    vendor: Vendor,
 ) -> Option<Identity> {
-    let sys: serde_json::Value = client
-        .get(format!("https://{host}{}", redfish::paths(vendor).system))
-        .basic_auth(user, Some(password))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .ok()?;
+    let vendor = session.vendor();
+    let rf = redfish::Redfish::new(client, session.host(), user, password)
+        .with_vendor(Some(vendor))
+        .with_timeout(Duration::from_secs(10));
+    let sys = rf.json(redfish::paths(vendor).system).ok()?;
+    let mut power = redfish::power_of(&sys);
+    if power.reset_types.is_empty()
+        && let Some(info) = redfish::reset_action_info_link(&sys)
+        && let Ok(doc) = rf.json(info)
+    {
+        power.reset_types = redfish::reset_types_from_action_info(&doc);
+    }
     let tag = match vendor {
         Vendor::Dell => "SKU",
-        Vendor::Supermicro => "SerialNumber",
+        Vendor::Supermicro | Vendor::MegaRac => "SerialNumber",
     };
-    let identity = Identity {
+    let mut identity = Identity {
         vendor,
         service_tag: redfish::str_field(&sys, tag),
         model: redfish::str_field(&sys, "Model"),
-        power: redfish::power_of(&sys),
+        power,
     };
+    if let Session::MegaRac(s) = session
+        && let Ok((model, serial)) = megarac::system_info(client, s)
+    {
+        if !model.is_empty() {
+            identity.model = model;
+        }
+        if !serial.is_empty() {
+            identity.service_tag = serial;
+        }
+    }
     identity.title().map(|_| identity)
 }
 
@@ -345,6 +381,12 @@ mod tests {
             Platform::Supermicro { base64_login: true }.vendor(),
             Vendor::Supermicro
         );
+        let megarac = r#"<head>
+    <meta charset="utf-8">
+    <title>MegaRAC SP-X</title>
+    <link rel="stylesheet" href="/styles.min.css">"#;
+        assert_eq!(platform_from("/", megarac), Platform::MegaRac);
+        assert_eq!(Platform::MegaRac.vendor(), Vendor::MegaRac);
     }
 
     #[test]
@@ -377,6 +419,16 @@ mod tests {
         assert_eq!(
             smc.title().as_deref(),
             Some("SYS-2029BT-HNTR, S/N A328789X8A10489")
+        );
+        let gbt = Identity {
+            vendor: Vendor::MegaRac,
+            service_tag: "DMG3ND621A0001".into(),
+            model: "R181-NA0-00".into(),
+            power: Default::default(),
+        };
+        assert_eq!(
+            gbt.title().as_deref(),
+            Some("R181-NA0-00, S/N DMG3ND621A0001")
         );
         assert_eq!(Identity::default().title(), None);
     }

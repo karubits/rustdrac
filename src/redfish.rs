@@ -1,7 +1,9 @@
 //! Health, sensors and the System Event Log (SEL) over Redfish.
 //!
 //! Redfish uses HTTP basic auth per request, so none of this takes one of the BMC's few
-//! web-session slots (or disturbs an open console).
+//! web-session slots (or disturbs an open console). The exception is a MegaRAC, where every
+//! basic-auth request by a PAM (IPMI) user counts as a login and the fifth within a minute is
+//! refused: there one Redfish session per host and user serves the whole run.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -57,10 +59,25 @@ const SUPERMICRO: Paths = Paths {
     skip_paging: false,
 };
 
+/// AMI MegaRAC SP-X (Gigabyte, tested on firmware 12.61): the `Self` singletons; `$expand`
+/// works and SEL pages carry a `nextLink`. The audit log stands in for a lifecycle log.
+const MEGARAC: Paths = Paths {
+    system: "/redfish/v1/Systems/Self",
+    chassis: "/redfish/v1/Chassis/Self",
+    manager: "/redfish/v1/Managers/Self",
+    sel_service: "/redfish/v1/Managers/Self/LogServices/SEL",
+    sel_entries: Some("/redfish/v1/Managers/Self/LogServices/SEL/Entries"),
+    aux_log_service: "/redfish/v1/Managers/Self/LogServices/AuditLog",
+    aux_log_entries: Some("/redfish/v1/Managers/Self/LogServices/AuditLog/Entries"),
+    expand: true,
+    skip_paging: false,
+};
+
 pub fn paths(vendor: Vendor) -> &'static Paths {
     match vendor {
         Vendor::Dell => &DELL,
         Vendor::Supermicro => &SUPERMICRO,
+        Vendor::MegaRac => &MEGARAC,
     }
 }
 
@@ -182,6 +199,45 @@ enum GetError {
     Fatal(anyhow::Error),
 }
 
+impl GetError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            GetError::Transient(e) | GetError::Fatal(e) => e,
+        }
+    }
+}
+
+/// Redfish session tokens by (host, user), for BMCs that need session auth (see the module
+/// doc). Ended by [`end_sessions`] at exit; the BMC expires them anyway.
+struct Token {
+    value: String,
+    /// Where to `DELETE` it.
+    location: String,
+    password: String,
+}
+
+fn tokens() -> &'static Mutex<HashMap<(String, String), Token>> {
+    static TOKENS: OnceLock<Mutex<HashMap<(String, String), Token>>> = OnceLock::new();
+    TOKENS.get_or_init(Default::default)
+}
+
+/// Delete every Redfish session this process opened (best effort, at exit).
+pub fn end_sessions(client: &Client) {
+    let tokens: Vec<Token> = tokens()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain()
+        .map(|(_, t)| t)
+        .collect();
+    for t in tokens {
+        let _ = client
+            .delete(&t.location)
+            .header("X-Auth-Token", &t.value)
+            .timeout(Duration::from_secs(5))
+            .send();
+    }
+}
+
 /// One lock per BMC host, shared by every Redfish client in the process.
 fn host_lock(host: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -204,6 +260,8 @@ pub struct Redfish {
     password: String,
     /// Known up front (from the address book), or detected on first use.
     vendor: Option<Vendor>,
+    /// Per-request timeout.
+    timeout: Duration,
 }
 
 /// One step of reading the full health, so the UI can show results as they arrive.
@@ -234,7 +292,14 @@ impl Redfish {
             user: user.to_string(),
             password: password.to_string(),
             vendor: None,
+            timeout: Duration::from_secs(60),
         }
+    }
+
+    /// Give up on a request after `timeout` (default 60 s; an iDRAC 8 can take seconds).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Use the saved vendor instead of probing the host (`None` keeps probing).
@@ -276,25 +341,132 @@ impl Redfish {
         }
     }
 
-    fn get_once(&self, path: &str) -> Result<Value, GetError> {
+    /// Whether requests carry a session token instead of basic auth (MegaRAC, see the
+    /// module doc). Unknown vendors keep basic auth.
+    fn uses_sessions(&self) -> bool {
+        self.vendor().ok() == Some(Vendor::MegaRac)
+    }
+
+    fn token_key(&self) -> (String, String) {
+        (self.host.to_lowercase(), self.user.clone())
+    }
+
+    /// The session token for this host and user: the cached one, or a new login. The flag
+    /// says whether it was just created (so a 401 with it is a rejected login, not an
+    /// expired session).
+    fn token(&self) -> Result<(String, bool), GetError> {
+        let key = self.token_key();
+        if let Some(t) = tokens()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .filter(|t| t.password == self.password)
+        {
+            return Ok((t.value.clone(), false));
+        }
         let resp = self
             .client
-            .get(format!("https://{}{path}", self.host))
-            .basic_auth(&self.user, Some(&self.password))
-            .timeout(Duration::from_secs(60))
+            .post(format!(
+                "https://{}/redfish/v1/SessionService/Sessions",
+                self.host
+            ))
+            .json(&serde_json::json!({ "UserName": self.user, "Password": self.password }))
+            .timeout(self.timeout)
             .send()
             .with_context(|| format!("connecting to https://{}", self.host))
             .map_err(GetError::Transient)?;
         let status = resp.status();
-        match status.as_u16() {
-            401 => {
-                return Err(GetError::Fatal(
-                    bmc::AuthFailed {
-                        host: self.host.clone(),
-                    }
-                    .into(),
-                ));
+        if status.as_u16() == 401 {
+            return Err(GetError::Fatal(
+                bmc::AuthFailed {
+                    host: self.host.clone(),
+                }
+                .into(),
+            ));
+        }
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let (value, location) = (header("X-Auth-Token"), header("Location"));
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GetError::Transient(anyhow::anyhow!(
+                "{}: Redfish login refused: {}",
+                self.host,
+                redfish_error(status, &body)
+            )));
+        }
+        let Some(value) = value.filter(|v| !v.is_empty()) else {
+            return Err(GetError::Fatal(anyhow::anyhow!(
+                "{}: Redfish login returned no session token",
+                self.host
+            )));
+        };
+        let location = match location {
+            Some(l) if l.starts_with('/') => format!("https://{}{l}", self.host),
+            Some(l) => l,
+            None => String::new(),
+        };
+        tokens().lock().unwrap_or_else(|e| e.into_inner()).insert(
+            key,
+            Token {
+                value: value.clone(),
+                location,
+                password: self.password.clone(),
+            },
+        );
+        Ok((value, true))
+    }
+
+    fn forget_token(&self) {
+        tokens()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.token_key());
+    }
+
+    /// Send `build()`'s request with the right credentials. A 401 is a rejected login with
+    /// basic auth or a fresh token; with a cached token it means the session expired, so the
+    /// token is dropped and the request repeated once with a new one.
+    fn send(
+        &self,
+        build: impl Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::Response, GetError> {
+        loop {
+            let (req, fresh) = if self.uses_sessions() {
+                let (token, fresh) = self.token()?;
+                (build().header("X-Auth-Token", token), fresh)
+            } else {
+                (build().basic_auth(&self.user, Some(&self.password)), true)
+            };
+            let resp = req
+                .timeout(self.timeout)
+                .send()
+                .with_context(|| format!("connecting to https://{}", self.host))
+                .map_err(GetError::Transient)?;
+            if resp.status().as_u16() != 401 {
+                return Ok(resp);
             }
+            if !fresh {
+                self.forget_token();
+                continue;
+            }
+            return Err(GetError::Fatal(
+                bmc::AuthFailed {
+                    host: self.host.clone(),
+                }
+                .into(),
+            ));
+        }
+    }
+
+    fn get_once(&self, path: &str) -> Result<Value, GetError> {
+        let resp = self.send(|| self.client.get(format!("https://{}{path}", self.host)))?;
+        let status = resp.status();
+        match status.as_u16() {
             403 => {
                 return Err(GetError::Fatal(anyhow::anyhow!(
                     "{}: user {} may not use Redfish",
@@ -529,8 +701,18 @@ impl Redfish {
         Ok(out)
     }
 
+    /// The power state and reset types. A MegaRAC lists its reset types only in the
+    /// action's `ActionInfo` document, so that is read when the system leaves them out.
     pub fn power(&self) -> Result<Power> {
-        Ok(power_of(&self.get(self.paths()?.system)?))
+        let system = self.get(self.paths()?.system)?;
+        let mut power = power_of(&system);
+        if power.reset_types.is_empty()
+            && let Some(info) = reset_action_info_link(&system)
+            && let Ok(doc) = self.get(info)
+        {
+            power.reset_types = reset_types_from_action_info(&doc);
+        }
+        Ok(power)
     }
 
     /// `ComputerSystem.Reset` with `reset_type` ("On", "ForceOff", "GracefulShutdown",
@@ -538,17 +720,18 @@ impl Redfish {
     pub fn reset(&self, reset_type: &str) -> Result<()> {
         let lock = host_lock(&self.host);
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let url = format!(
+            "https://{}{}/Actions/ComputerSystem.Reset",
+            self.host,
+            self.paths()?.system
+        );
         let resp = self
-            .client
-            .post(format!(
-                "https://{}{}/Actions/ComputerSystem.Reset",
-                self.host,
-                self.paths()?.system
-            ))
-            .basic_auth(&self.user, Some(&self.password))
-            .json(&serde_json::json!({ "ResetType": reset_type }))
-            .timeout(Duration::from_secs(60))
-            .send()
+            .send(|| {
+                self.client
+                    .post(&url)
+                    .json(&serde_json::json!({ "ResetType": reset_type }))
+            })
+            .map_err(GetError::into_error)
             .with_context(|| format!("{}: power action {reset_type}", self.host))?;
         let status = resp.status();
         if status.is_success() {
@@ -569,16 +752,13 @@ impl Redfish {
     }
 
     pub fn clear_sel(&self) -> Result<()> {
-        self.client
-            .post(format!(
-                "https://{}{}/Actions/LogService.ClearLog",
-                self.host,
-                self.paths()?.sel_service
-            ))
-            .basic_auth(&self.user, Some(&self.password))
-            .json(&serde_json::json!({}))
-            .timeout(Duration::from_secs(60))
-            .send()
+        let url = format!(
+            "https://{}{}/Actions/LogService.ClearLog",
+            self.host,
+            self.paths()?.sel_service
+        );
+        self.send(|| self.client.post(&url).json(&serde_json::json!({})))
+            .map_err(GetError::into_error)
             .context("clearing the SEL")?
             .error_for_status()
             .context("clearing the SEL")?;
@@ -614,6 +794,25 @@ pub fn power_of(system: &Value) -> Power {
                 .map(str::to_string)
                 .collect(),
     }
+}
+
+/// The `@Redfish.ActionInfo` link of `ComputerSystem.Reset`, when the system gives one.
+pub fn reset_action_info_link(system: &Value) -> Option<&str> {
+    system["Actions"]["#ComputerSystem.Reset"]["@Redfish.ActionInfo"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// The `ResetType` values an `ActionInfo` document allows.
+pub fn reset_types_from_action_info(info: &Value) -> Vec<String> {
+    info["Parameters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["Name"].as_str() == Some("ResetType"))
+        .flat_map(|p| p["AllowableValues"].as_array().cloned().unwrap_or_default())
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
 }
 
 /// The message of a Redfish error reply, if it has one, else the HTTP status.
@@ -714,9 +913,14 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
                         .map(|w| format!("{w:.0} W output"))
                 })
                 .unwrap_or_default();
+            // AMI lists PSUs without a name, only a member id.
+            let mut name = str_field(psu, "Name");
+            if name.is_empty() {
+                name = format!("PSU {}", str_field(psu, "MemberId"));
+            }
             sensors.push(Sensor {
                 category: "Power Supply",
-                name: str_field(psu, "Name"),
+                name,
                 health,
                 reading: watts,
             });
@@ -818,6 +1022,18 @@ fn sel_entry(e: &Value) -> SelEntry {
             raw
         };
     }
+    // AMI (MegaRAC) dumps the raw IPMI record into the message: pick out the event and the
+    // sensor name instead.
+    let raw = str_field(e, "Message");
+    let mut message = raw.clone();
+    if let Some(fields) = ipmi_dump_fields(&raw) {
+        if let Some(event_type) = fields.get("Event_Type").filter(|s| !s.is_empty()) {
+            message = event_type.to_string();
+        }
+        if let Some(name) = fields.get("Sensor_Name").filter(|s| !s.is_empty()) {
+            sensor = name.to_string();
+        }
+    }
     SelEntry {
         id: e["Id"]
             .as_str()
@@ -826,10 +1042,26 @@ fn sel_entry(e: &Value) -> SelEntry {
             .unwrap_or(0),
         created: str_field(e, "Created"),
         severity: Health::parse(e["Severity"].as_str()),
-        message: str_field(e, "Message"),
+        message,
         sensor,
         event: first_member("EntryCode"),
     }
+}
+
+/// The `key : value` pairs of an AMI SEL message such as
+/// `"Event_Data_1 : 160, Record_Type : system event record, …, Event_Type : Correctable ECC,
+/// Sensor_Type : Memory, , Sensor_Name : DIMM_P0_B0"`; `None` for any other message.
+fn ipmi_dump_fields(message: &str) -> Option<HashMap<&str, &str>> {
+    if !message.contains("Event_Type : ") || !message.contains("Record_Type : ") {
+        return None;
+    }
+    Some(
+        message
+            .split(',')
+            .filter_map(|part| part.split_once(" : "))
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .collect(),
+    )
 }
 
 /// The newest Warning/Critical SEL events, as sensors for an alarm summary.
@@ -867,6 +1099,69 @@ pub fn sel_csv(entries: &[SelEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn megarac_paths_are_the_known_ones() {
+        let p = super::paths(super::Vendor::MegaRac);
+        assert_eq!(p.system, "/redfish/v1/Systems/Self");
+        assert_eq!(
+            p.sel_entries,
+            Some("/redfish/v1/Managers/Self/LogServices/SEL/Entries")
+        );
+        assert!(p.expand);
+        assert!(!p.skip_paging);
+    }
+
+    #[test]
+    fn reset_types_come_from_action_info() {
+        let system: serde_json::Value = serde_json::from_str(
+            r##"{"Actions":{"#ComputerSystem.Reset":{"@Redfish.ActionInfo":"/redfish/v1/Systems/Self/ResetActionInfo","target":"/redfish/v1/Systems/Self/Actions/ComputerSystem.Reset"}},"PowerState":"On"}"##,
+        )
+        .unwrap();
+        assert!(super::power_of(&system).reset_types.is_empty());
+        assert_eq!(
+            super::reset_action_info_link(&system),
+            Some("/redfish/v1/Systems/Self/ResetActionInfo")
+        );
+        let info: serde_json::Value = serde_json::from_str(
+            r#"{"Id":"ResetAction","Parameters":[{"AllowableValues":["GracefulShutdown","ForceRestart","On","ForceOff"],"DataType":"String","Name":"ResetType","Required":true}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::reset_types_from_action_info(&info),
+            ["GracefulShutdown", "ForceRestart", "On", "ForceOff"]
+        );
+        assert_eq!(
+            super::reset_action_info_link(&serde_json::Value::Null),
+            None
+        );
+    }
+
+    #[test]
+    fn ami_sel_messages_are_decoded() {
+        let e: serde_json::Value = serde_json::from_str(
+            r#"{"Created":"2024-07-08T02:41:19Z","EntryCode":"Assert","Id":"4","Message":"Event_Data_1 : 160, Record_Type : system event record, Sensor_Number : 8, Event_Dir : Assertion event, Event_Data_2 : 0, Timestamp : 2024-07-08T02:41:17+00:00, EvM_Rev : IPMI v2.0 Event Messages, Generator_ID : 0x2100, Event_Data_3 : 16, Event_Type : Correctable ECC, Record_ID : 4, Sensor_Type : Memory, , Sensor_Name : DIMM_P0_B0","SensorType":"Memory","Severity":"Warning"}"#,
+        )
+        .unwrap();
+        let entry = super::sel_entry(&e);
+        assert_eq!(entry.id, 4);
+        assert_eq!(entry.message, "Correctable ECC");
+        assert_eq!(entry.sensor, "DIMM_P0_B0");
+        assert_eq!(entry.event, "Assert");
+        assert_eq!(entry.severity, super::Health::Warning);
+        // Without a sensor name the sensor type stays.
+        let e2 = serde_json::json!({"Id": "1", "Message": "Record_Type : system event record, Event_Type : Log Area Reset/Cleared, Sensor_Type : Event Logging Disabled, ", "SensorType": "Event Logging Disabled", "Severity": "OK"});
+        let entry = super::sel_entry(&e2);
+        assert_eq!(entry.message, "Log Area Reset/Cleared");
+        assert_eq!(entry.sensor, "Event Logging Disabled");
+        // Other vendors' messages pass through.
+        let dell = serde_json::json!({"Id": "7", "Message": "CPU 1 machine check error detected.", "SensorType": "Processor", "Severity": "Critical"});
+        assert_eq!(
+            super::sel_entry(&dell).message,
+            "CPU 1 machine check error detected."
+        );
+        assert!(super::ipmi_dump_fields("a, b : c").is_none());
+    }
+
     /// Against a real, unused server: graceful shutdown (force off if that takes too
     /// long), then power on, reading the state back the way the console tab does.
     /// `RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored power_off --nocapture`

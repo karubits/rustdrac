@@ -520,7 +520,11 @@ impl HealthTab {
             .chain()
             .find_map(|c| c.downcast_ref::<HostHeaderRejected>());
         let Some(rejected) = rejected else {
-            self.0.error.set_text(&format!("{e:#}"));
+            let target = self.target();
+            let vendor = target
+                .vendor
+                .or_else(|| crate::bmc::cached_vendor(&target.host));
+            self.0.error.set_text(&auth_failure_text(e, vendor));
             return;
         };
         self.0
@@ -855,6 +859,21 @@ impl HealthTab {
                 t.refresh();
             });
         });
+    }
+}
+
+/// The error as shown, with a pointer to the MegaRAC Redfish note when a MegaRAC rejected
+/// the login: its Redfish service refuses accounts the web UI accepts until PAM is on.
+fn auth_failure_text(e: &anyhow::Error, vendor: Option<Vendor>) -> String {
+    let text = format!("{e:#}");
+    if vendor == Some(Vendor::MegaRac) && crate::bmc::is_auth_failure(e) {
+        format!(
+            "{text}\n\nOn a MegaRAC BMC, Redfish may refuse an account the web UI accepts \
+             (its Redfish service checks its own password store unless PAM is enabled). \
+             See docs/megarac-redfish-login.md."
+        )
+    } else {
+        text
     }
 }
 

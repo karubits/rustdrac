@@ -480,7 +480,7 @@ impl ConsoleTab {
         self.0.model.set(&identity.model);
         self.0.serial.set_caption(match identity.vendor {
             bmc::Vendor::Dell => "Service Tag",
-            bmc::Vendor::Supermicro => "Serial",
+            bmc::Vendor::Supermicro | bmc::Vendor::MegaRac => "Serial",
         });
         self.0.serial.set(&identity.service_tag);
         self.0.address.set_caption(identity.vendor.bmc_name());
@@ -1065,13 +1065,7 @@ fn centered_box() -> gtk::Box {
 
 fn connect_blocking(client: &Client, target: &Target) -> Result<Connected> {
     let session = bmc::login(client, &target.host, &target.user, &target.password)?;
-    let identity = bmc::identity(
-        client,
-        &target.host,
-        &target.user,
-        &target.password,
-        session.vendor(),
-    );
+    let identity = bmc::identity(client, &session, &target.user, &target.password);
     let title = identity
         .as_ref()
         .and_then(|i| i.title())

@@ -179,7 +179,7 @@ pub fn summary_json(c: &Collected, name: &str, host: &str, exported_at: &str) ->
     // Dell's service tag is the SKU; elsewhere the serial number is the identity.
     let service_tag = match c.vendor {
         Vendor::Dell => s(&c.system, "SKU"),
-        Vendor::Supermicro => s(&c.system, "SerialNumber"),
+        Vendor::Supermicro | Vendor::MegaRac => s(&c.system, "SerialNumber"),
     };
     json!({
         "exported_at": exported_at,

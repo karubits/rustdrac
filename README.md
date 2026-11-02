@@ -4,7 +4,7 @@
 
 # Rust Drac
 
-**A fast, native Linux and Windows app for Dell iDRAC 8 & 9 and Supermicro X11 servers. Made with Rust 🦀**
+**A fast, native Linux and Windows app for Dell iDRAC 8 & 9, Supermicro X11 and AMI MegaRAC (Gigabyte) servers. Made with Rust 🦀**
 
 Virtual console in tabs · address book · health & SEL viewer · background alarms.<br>
 No browser, no Java, no login page, no certificate warnings.
@@ -21,6 +21,7 @@ No browser, no Java, no login page, no certificate warnings.
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-informational?logo=windows&logoColor=white)](#windows)
 [![iDRAC 8 | 9](https://img.shields.io/badge/Dell%20iDRAC-8%20%7C%209-0076ce?logo=dell&logoColor=white)](#how-it-works)
 [![Supermicro X11](https://img.shields.io/badge/Supermicro-X11-1b5e20)](#supermicro-x11)
+[![AMI MegaRAC](https://img.shields.io/badge/AMI%20MegaRAC-SP--X-6d4c9f)](#ami-megarac-gigabyte)
 
 [Download](#download) · [Features](#features) · [Usage](#usage) · [Build](#build-from-source) · [Contributing](#contributing)
 
@@ -32,7 +33,7 @@ No browser, no Java, no login page, no certificate warnings.
 
 | | |
 |---|---|
-| 🖥️ **Virtual console in tabs** | The HTML5 KVM viewer of Dell iDRAC 8 and 9 and of Supermicro X11 BMCs, opened straight from the app with no login page or certificate prompt. Several servers side by side. |
+| 🖥️ **Virtual console in tabs** | The HTML5 KVM viewer of Dell iDRAC 8 and 9, Supermicro X11 and AMI MegaRAC (Gigabyte) BMCs, opened straight from the app with no login page or certificate prompt. Several servers side by side. |
 | 📒 **Address book** | Groups, tags, notes, and instant search across every field. Vendor, service tag (or serial number) and model fill themselves in from Redfish. |
 | ❤️ **Health & SEL** | Every component and sensor, plus the full System Event Log with filtering, search, CSV export and clearing. |
 | 🔔 **Alarm checker** | Polls your servers in the background and sends a desktop notification when one turns Warning or Critical. |
@@ -173,7 +174,7 @@ Dark mode is the default: Adwaita dark plus the app's own stylesheet with an ora
 
 ## How it works
 
-The app first checks which web UI the BMC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9) or what it serves there (a Supermicro BMC answers with its login form, which posts to `/cgi/login.cgi`), so you never pick the vendor or generation yourself. The result is saved as `vendor:` in the address book, and the Redfish paths follow from it (`Systems/System.Embedded.1` and `Managers/iDRAC.Embedded.1` on Dell, `Systems/1` and `Managers/1` on Supermicro).
+The app first checks which web UI the BMC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9) or what it serves there (a Supermicro BMC answers with its login form, which posts to `/cgi/login.cgi`; a MegaRAC serves its single-page app titled "MegaRAC SP-X"), so you never pick the vendor or generation yourself. The result is saved as `vendor:` in the address book, and the Redfish paths follow from it (`Systems/System.Embedded.1` and `Managers/iDRAC.Embedded.1` on Dell, `Systems/1` and `Managers/1` on Supermicro, `Systems/Self` and `Managers/Self` on MegaRAC).
 
 ### iDRAC 8
 
@@ -201,7 +202,21 @@ Note: the iDRAC 8 only serves gzip-compressed static files, so a client that doe
 
 Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query string is answered with a redirect and then HTTP 501, so the app reads collections member by member there. The SEL is `Systems/1/LogServices/Log1`; the maintenance event log (`Managers/1/LogServices/Log1`) takes the place of Dell's Lifecycle log in the export.
 
+### AMI MegaRAC (Gigabyte)
+
+Tested on a Gigabyte R181-NA0 with MegaRAC SP-X firmware 12.61. Other AMI-based BMCs with the same web UI should work the same way.
+
+1. **Login.** `POST /api/session` with the user and password as a form, which sets the `QSESSIONID` cookie and returns a CSRF token that every later request repeats in an `X-CSRFTOKEN` header.
+2. **Viewer.** `/viewer.html` is the HTML5 viewer the web UI opens in a popup. It expects what the web UI left in `sessionStorage` (the CSRF token, user name, privilege and the BMC's feature list, which decides the KVM handshake: with `KVM_SESSION_RECONNECT` the KVM service refuses the plain one) and a readable cookie before it fetches its own KVM token and opens a `wss://` WebSocket to `/kvm` on port 443. An injected script seeds those, so the page loads in the embedded web view as if the web UI had opened it.
+3. **Closing.** The page is unloaded, which closes the KVM socket, then `DELETE /api/session` ends the web session.
+
+Redfish is standard AMI: `Systems/Self`, `Chassis/Self`, `Managers/Self`, with `$expand` and paged SEL entries under `Managers/Self/LogServices/SEL`. Unlike on the other vendors, the app logs in to Redfish once (`POST /redfish/v1/SessionService/Sessions`) and sends the session token with every request: for a PAM (IPMI) user every basic-auth request counts as a login, and the BMC refuses the fifth within a minute. The session is deleted when the app exits. Two more quirks are handled: the system document lists no reset types (they are read from `ResetActionInfo`, and on this firmware that is On, Force Off, Graceful Shutdown and Reset), and SEL messages are the raw IPMI record (`Event_Type : Correctable ECC, …, Sensor_Name : DIMM_P0_B0`), from which the app shows the event and the sensor name. Redfish reports no serial number, so the console title takes it from the web API. The BMC's audit log (`Managers/Self/LogServices/AuditLog`) takes the place of Dell's Lifecycle log in the export.
+
+If Redfish rejects a user that the web UI accepts (the Health & SEL tab says invalid username or password while the console works), see [docs/megarac-redfish-login.md](docs/megarac-redfish-login.md): the Redfish service checks its own password store until PAM is enabled.
+
 ## Troubleshooting
+
+**"Invalid username or password" on the Health & SEL tab of a MegaRAC (Gigabyte) BMC while the console works.** The Redfish service only authenticates against its own password store until PAM is enabled; the web UI has no switch for it. [docs/megarac-redfish-login.md](docs/megarac-redfish-login.md) has the one Redfish call that fixes it.
 
 **"Access Error: 400 -- Bad Request" from an iDRAC reached by name.** Since firmware 2.81 (iDRAC 8) and 5.10 (iDRAC 9), the iDRAC validates the HTTP `Host` header (`idrac.webserver.HostHeaderCheck`, on by default; Dell added it with the fix for the host header injection flaw [CVE-2021-21510](https://www.dell.com/support/kbdoc/en-us/000183758), DSA-2021-041). It answers only to its IP addresses, its RAC name and DNS name (`iDRAC.NIC.DNSRacName` + `DNSDomainName`, by default `idrac-<service tag>`) and the names in `idrac.webserver.ManualDNSEntry`; any other name, such as a CNAME or a short name, gets the 400. The TLS certificate is unrelated. Rust Drac explains this on the tab, offers to connect to the resolved IP address instead, and shows the fixes, which are run on the iDRAC (racadm over SSH to its IP address):
 

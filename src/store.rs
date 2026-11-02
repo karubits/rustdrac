@@ -16,7 +16,7 @@
 //!     tags: [r630, pxe]
 //!     service_tag: ABC1234     # or the serial number on other vendors
 //!     model: PowerEdge R630
-//!     vendor: dell             # dell or supermicro; learned on first connect, or set by hand
+//!     vendor: dell             # dell, supermicro or megarac; learned on first connect, or set by hand
 //!     notes: Rack 3, U12
 //!     save_password: true
 //! ```

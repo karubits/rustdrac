@@ -1,15 +1,15 @@
 [package]
 name = "rustdrac"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
-description = "Rust Drac: Dell iDRAC 8/9 and Supermicro X11 console launcher, address book, health and SEL viewer"
+description = "Rust Drac: Dell iDRAC 8/9, Supermicro X11 and AMI MegaRAC (Gigabyte) console launcher, address book, health and SEL viewer"
 license = "MIT"
 authors = ["Karubits <karubits@proton.me>"]
 rust-version = "1.88"
 readme = "README.md"
 repository = "https://github.com/karubits/rustdrac"
 homepage = "https://github.com/karubits/rustdrac"
-keywords = ["idrac", "dell", "supermicro", "kvm", "redfish"]
+keywords = ["idrac", "dell", "supermicro", "megarac", "redfish"]
 categories = ["gui", "network-programming"]
 publish = false
 

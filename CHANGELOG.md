@@ -4,9 +4,13 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
-## Unreleased
+## 2026-11-02 (v0.5.0)
 
 ### Added
+- **AMI MegaRAC (Gigabyte) support**: the HTML5 viewer in a console tab, power control, Health & SEL, the alarm checker, log export and address-book autofill, detected from the BMC's "MegaRAC SP-X" page like the other vendors. Redfish there is used through one session per BMC and user (a MegaRAC refuses a PAM user's fifth basic-auth request within a minute), ended when the app exits. Tested on a Gigabyte R181-NA0 (MegaRAC SP-X firmware 12.61). The address book accepts `vendor: megarac`.
+- SEL entries whose message is a raw IPMI record (AMI firmware) show the event and the sensor name instead of the key-value dump.
+- Reset types are read from the action's `ActionInfo` document when the system leaves them out (AMI firmware), so the power menu only offers what the BMC accepts.
+- `docs/megarac-redfish-login.md`: why a MegaRAC's Redfish rejects users the web UI accepts (PAM is off in its account service) and the one call that fixes it; the Health tab points there when a MegaRAC rejects a login.
 - Console tabs have a power button showing the server's power state, with **Power On**, **Graceful Shutdown**, **Force Off**, **Reset**, **Graceful Restart** and **Power Cycle** (Redfish `ComputerSystem.Reset`). Only actions the BMC offers are enabled, everything but Power On asks first, and the state is read back afterwards.
 - A rejected login ("invalid username or password") on a console or Health tab shows a **Change Password…** button: enter another user name and password and connect again. For an address-book entry the new user name is saved and the password can be saved to the keyring.
 

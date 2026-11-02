@@ -11,9 +11,9 @@ PackageUrl: https://github.com/karubits/rustdrac
 License: MIT
 LicenseUrl: https://github.com/karubits/rustdrac/blob/master/LICENSE
 Copyright: Copyright (c) Karubits
-ShortDescription: Console launcher, address book and health viewer for Dell iDRAC 8/9 and Supermicro X11 BMCs
+ShortDescription: Console launcher, address book and health viewer for Dell iDRAC, Supermicro and AMI MegaRAC BMCs
 Description: |-
-  Rust Drac opens the HTML5 virtual console of Dell iDRAC 8/9 and Supermicro X11 BMCs in a tab,
+  Rust Drac opens the HTML5 virtual console of Dell iDRAC 8/9, Supermicro X11 and AMI MegaRAC (Gigabyte) BMCs in a tab,
   keeps an address book of servers with their service tag or serial, shows health and the
   System Event Log over Redfish, checks every saved server for alarms in the background and
   exports health, SEL and BMC logs as a zip. Passwords are kept in the Windows Credential Manager.
@@ -25,6 +25,7 @@ Tags:
   - idrac
   - ipmi
   - kvm
+  - megarac
   - redfish
   - sel
   - server

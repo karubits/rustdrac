@@ -762,7 +762,7 @@ fn edit_dialog(
     let name = entry(&conn.name, "defaults to the address");
     let address = entry(
         &conn.address,
-        "hostname or IP of the BMC (iDRAC or Supermicro)",
+        "hostname or IP of the BMC (iDRAC, Supermicro or MegaRAC)",
     );
     let vendor = gtk::ComboBoxText::new();
     vendor.append(Some("auto"), "Detect on connect");
@@ -770,7 +770,10 @@ fn edit_dialog(
         vendor.append(Some(v.id()), v.label());
     }
     vendor.set_active_id(Some(conn.vendor.map(Vendor::id).unwrap_or("auto")));
-    let user = entry(&conn.user, "root (Dell) or ADMIN (Supermicro)");
+    let user = entry(
+        &conn.user,
+        "root (Dell), ADMIN (Supermicro) or admin (MegaRAC)",
+    );
     let password = entry(
         "",
         if conn.save_password {

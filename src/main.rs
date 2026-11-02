@@ -6,6 +6,7 @@ mod export;
 mod health;
 mod idrac;
 mod manager;
+mod megarac;
 mod redfish;
 mod store;
 mod supermicro;
@@ -38,7 +39,7 @@ use store::{Connection, Store};
 const APP_TITLE: &str = "Rust Drac";
 const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
-/// Dell iDRAC 8/9 and Supermicro X11 HTML5 virtual console, without a browser.
+/// Dell iDRAC 8/9, Supermicro X11 and AMI MegaRAC HTML5 virtual console, without a browser.
 ///
 /// With no arguments the connection manager opens. Each HOST opens a console tab; a HOST can
 /// be an address, or the name, address or service tag / serial of a saved connection.
@@ -108,6 +109,10 @@ fn run(cli: Cli) -> Result<()> {
     app.schedule_checks();
     app.testing_aids();
     gtk::main();
+    // Redfish sessions (MegaRAC) would otherwise linger until the BMC expires them.
+    if let Ok(client) = bmc::http_client() {
+        redfish::end_sessions(&client);
+    }
     Ok(())
 }
 
@@ -456,7 +461,7 @@ impl App {
             .program_name(APP_TITLE)
             .version(env!("CARGO_PKG_VERSION"))
             .comments(
-                "A native app for Dell iDRAC 8/9 and Supermicro X11 servers: the HTML5 virtual console \
+                "A native app for Dell iDRAC 8/9, Supermicro X11 and AMI MegaRAC (Gigabyte) servers: the HTML5 virtual console \
                  in tabs, an address book, a health and System Event Log viewer and a \
                  background alarm checker.\n\n\
                  Made with Rust 🦀, GTK 3 and WebKitGTK (WebView2 on Windows).\n\n\
