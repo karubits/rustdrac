@@ -957,7 +957,7 @@ impl ConsoleTab {
 
 /// The host header refusal as a readable error page: why, then the fixes with their
 /// commands in monospace.
-fn host_header_markup(rejected: &HostHeaderRejected) -> String {
+pub(crate) fn host_header_markup(rejected: &HostHeaderRejected) -> String {
     let esc = glib::markup_escape_text;
     let mut out = format!(
         "<b>{} answered \"Access Error: 400 -- Bad Request\".</b>\n\n{}",
@@ -974,7 +974,7 @@ fn host_header_markup(rejected: &HostHeaderRejected) -> String {
 }
 
 /// "host:port" → ("host", Some("port")); anything else is all host.
-fn split_port(host: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_port(host: &str) -> (&str, Option<&str>) {
     match host.rsplit_once(':') {
         Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
             (name, Some(port))
@@ -984,7 +984,7 @@ fn split_port(host: &str) -> (&str, Option<&str>) {
 }
 
 /// The first IPv4 address (else IPv6) `host` resolves to, as text, keeping any port.
-fn resolve(host: &str) -> Option<String> {
+pub(crate) fn resolve(host: &str) -> Option<String> {
     use std::net::ToSocketAddrs;
     let (name, port) = split_port(host);
     let addrs: Vec<_> = (name, 443).to_socket_addrs().ok()?.collect();

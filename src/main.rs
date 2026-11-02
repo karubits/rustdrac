@@ -789,7 +789,7 @@ impl App {
             .health_tabs
             .borrow()
             .iter()
-            .find(|t| t.connection_id() == Some(conn.id.as_str()))
+            .find(|t| t.connection_id().as_deref() == Some(conn.id.as_str()))
             .cloned();
         if let Some(tab) = existing {
             if let Some(n) = self.0.notebook.page_num(&tab.widget()) {

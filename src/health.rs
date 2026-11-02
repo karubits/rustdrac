@@ -9,6 +9,7 @@ use gtk::prelude::*;
 use reqwest::blocking::Client;
 
 use crate::bmc::Vendor;
+use crate::idrac::HostHeaderRejected;
 use crate::redfish::{self, Health, HealthReport, Redfish, SelEntry, Step};
 use crate::theme::health_markup;
 
@@ -46,10 +47,17 @@ const S_SENSOR: u32 = 3;
 const S_MESSAGE: u32 = 4;
 
 struct Inner {
-    target: Target,
+    target: RefCell<Target>,
     client: Client,
     hooks: Hooks,
     root: gtk::Box,
+    /// "report" (components and SEL) or "error" (nothing could be read).
+    body: gtk::Stack,
+    error: gtk::Label,
+    /// "Connect by IP address": shown when the BMC refused the host name.
+    by_ip: gtk::Button,
+    ip: RefCell<Option<String>>,
+    retry: gtk::Button,
     tab: gtk::Box,
     tab_spinner: gtk::Spinner,
     overall: gtk::Label,
@@ -169,10 +177,32 @@ impl HealthTab {
         paned.pack2(&sel_box, true, false);
         paned.set_position(330);
 
+        // Error page, when not even the system resource could be read.
+        let error = gtk::Label::builder()
+            .wrap(true)
+            .selectable(true)
+            .xalign(0.0)
+            .max_width_chars(100)
+            .build();
+        let retry = gtk::Button::with_label("Retry");
+        retry.style_context().add_class("suggested-action");
+        let by_ip = gtk::Button::with_label("Connect by IP Address");
+        by_ip.set_no_show_all(true);
+        let error_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        error_buttons.add(&retry);
+        error_buttons.add(&by_ip);
+        let error_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        error_box.set_valign(gtk::Align::Start);
+        error_box.add(&error);
+        error_box.add(&error_buttons);
+        let body = gtk::Stack::new();
+        body.add_named(&paned, "report");
+        body.add_named(&scrolled(&error_box), "error");
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.set_border_width(14);
         root.add(&header);
-        root.pack_start(&paned, true, true, 0);
+        root.pack_start(&body, true, true, 0);
         root.show_all();
         spinner.hide();
 
@@ -193,10 +223,15 @@ impl HealthTab {
         tab.show_all();
 
         let this = HealthTab(Rc::new(Inner {
-            target,
+            target: RefCell::new(target),
             client,
             hooks,
             root,
+            body,
+            error,
+            by_ip,
+            ip: RefCell::new(None),
+            retry: retry.clone(),
             tab,
             tab_spinner,
             overall,
@@ -219,6 +254,12 @@ impl HealthTab {
 
         let t = this.downgrade();
         refresh.connect_clicked(move |_| with(&t, |t| t.refresh()));
+        let t = this.downgrade();
+        retry.connect_clicked(move |_| with(&t, |t| t.refresh()));
+        let t = this.downgrade();
+        this.0
+            .by_ip
+            .connect_clicked(move |_| with(&t, |t| t.connect_by_ip()));
         let t = this.downgrade();
         export.connect_clicked(move |_| with(&t, |t| t.export()));
         let t = this.downgrade();
@@ -278,15 +319,15 @@ impl HealthTab {
     }
 
     pub fn title(&self) -> String {
-        format!("{} · Health & SEL", self.0.target.name)
+        format!("{} · Health & SEL", self.target().name)
     }
 
-    pub fn target(&self) -> &Target {
-        &self.0.target
+    pub fn target(&self) -> Target {
+        self.0.target.borrow().clone()
     }
 
-    pub fn connection_id(&self) -> Option<&str> {
-        self.0.target.connection_id.as_deref()
+    pub fn connection_id(&self) -> Option<String> {
+        self.0.target.borrow().connection_id.clone()
     }
 
     fn downgrade(&self) -> Weak<Inner> {
@@ -318,15 +359,15 @@ impl HealthTab {
         if self.0.pending.get() > 0 {
             return;
         }
+        let t = self.target();
         if self.0.report.borrow().is_none() {
             self.0.overall.set_markup("<b>Reading health…</b>");
             self.0
                 .subtitle
-                .set_text(&format!("{} as {}", self.0.target.host, self.0.target.user));
+                .set_text(&format!("{} as {}", t.host, t.user));
         }
         self.busy(2);
 
-        let t = &self.0.target;
         let rf = Redfish::new(&self.0.client, &t.host, &t.user, &t.password).with_vendor(t.vendor);
 
         // The SEL in parallel (its own connection), health step by step on another, showing
@@ -388,7 +429,7 @@ impl HealthTab {
                 .as_ref()
                 .map(Clone::clone)
                 .map_err(|e| format!("{e:#}"));
-            (self.0.hooks.on_report)(&self.0.target, &shared);
+            (self.0.hooks.on_report)(&self.target(), &shared);
         }
         let now = glib::DateTime::now_local()
             .and_then(|d| d.format("%H:%M:%S"))
@@ -406,9 +447,10 @@ impl HealthTab {
                         n => format!("{n} components need attention"),
                     })
                 ));
+                self.0.body.set_visible_child_name("report");
                 self.0.subtitle.set_text(&format!(
                     "{} · power {} · {} components · {}",
-                    self.0.target.host,
+                    self.target().host,
                     report.power_state,
                     report.sensors.len(),
                     progress.map_or_else(|| format!("checked {now}"), str::to_string),
@@ -424,9 +466,74 @@ impl HealthTab {
                     "<span size='x-large'>{}</span>",
                     health_markup(Health::Unknown)
                 ));
-                self.0.subtitle.set_text(&format!("{e:#}"));
+                self.0.subtitle.set_text(first_line(&format!("{e:#}")));
+                if first {
+                    self.show_error_page(&e);
+                }
             }
         }
+    }
+
+    /// Nothing could be read: the whole error in place of the lists, with Retry and, when
+    /// the BMC refused the host name, "Connect by IP Address" once the name resolves.
+    fn show_error_page(&self, e: &anyhow::Error) {
+        self.0.by_ip.hide();
+        self.0
+            .by_ip
+            .style_context()
+            .remove_class("suggested-action");
+        self.0.retry.style_context().add_class("suggested-action");
+        self.0.body.set_visible_child_name("error");
+        let rejected = e
+            .chain()
+            .find_map(|c| c.downcast_ref::<HostHeaderRejected>());
+        let Some(rejected) = rejected else {
+            self.0.error.set_text(&format!("{e:#}"));
+            return;
+        };
+        self.0
+            .error
+            .set_markup(&crate::console::host_header_markup(rejected));
+        let host = self.target().host;
+        if crate::console::split_port(&host)
+            .0
+            .parse::<std::net::IpAddr>()
+            .is_ok()
+        {
+            return;
+        }
+        let name = host.clone();
+        let weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let ip = blocking(move || Ok(crate::console::resolve(&name)))
+                .await
+                .ok()
+                .flatten();
+            with(&weak, |t| {
+                if t.target().host != host || t.0.report.borrow().is_some() {
+                    return;
+                }
+                if let Some(ip) = ip {
+                    *t.0.ip.borrow_mut() = Some(ip.clone());
+                    t.0.by_ip
+                        .set_label(&format!("Connect by IP Address ({ip})"));
+                    // The IP address is the likely choice now, not Retry.
+                    t.0.retry.style_context().remove_class("suggested-action");
+                    t.0.by_ip.style_context().add_class("suggested-action");
+                    t.0.by_ip.show();
+                }
+            });
+        });
+    }
+
+    /// Read again from the IP address the button names (the tab keeps its name).
+    fn connect_by_ip(&self) {
+        let Some(ip) = self.0.ip.borrow_mut().take() else {
+            return;
+        };
+        self.0.target.borrow_mut().host = ip;
+        self.0.by_ip.hide();
+        self.refresh();
     }
 
     fn got_sel(&self, result: Result<Vec<SelEntry>>) {
@@ -439,9 +546,10 @@ impl HealthTab {
             }
             Err(e) => {
                 self.0.sel_model.clear();
-                self.0
-                    .sel_count
-                    .set_text(&format!("could not read the SEL: {e:#}"));
+                // One line next to the heading; the rest in its tooltip.
+                let text = format!("could not read the SEL: {e:#}");
+                self.0.sel_count.set_text(first_line(&text));
+                self.0.sel_count.set_tooltip_text(Some(&text));
             }
         }
     }
@@ -641,8 +749,7 @@ impl HealthTab {
         dialog.set_do_overwrite_confirmation(true);
         dialog.set_current_name(&format!(
             "sel-{}.csv",
-            self.0
-                .target
+            self.target()
                 .name
                 .replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
         ));
@@ -667,7 +774,7 @@ impl HealthTab {
             gtk::DialogFlags::MODAL,
             gtk::MessageType::Warning,
             gtk::ButtonsType::None,
-            &format!("Clear the System Event Log on {}?", self.0.target.name),
+            &format!("Clear the System Event Log on {}?", self.target().name),
         );
         dialog.set_secondary_text(Some(
             "Every SEL entry on the BMC is deleted. This cannot be undone — export it first if you need a record.",
@@ -683,7 +790,7 @@ impl HealthTab {
             return;
         }
         self.busy(1);
-        let target = self.0.target.clone();
+        let target = self.target();
         let client = self.0.client.clone();
         let job = gtk::gio::spawn_blocking(move || {
             Redfish::new(&client, &target.host, &target.user, &target.password)
@@ -723,6 +830,11 @@ fn with(weak: &Weak<Inner>, f: impl FnOnce(&HealthTab)) {
 const SEL_HEADER: &str = "Date\tSeverity\tEvent\tSensor\tMessage";
 
 /// One SEL entry as a tab-separated line, as shown in the list.
+/// Up to the first line break (long explanations go elsewhere).
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("")
+}
+
 fn sel_line(e: &SelEntry) -> String {
     format!(
         "{}\t{}\t{}\t{}\t{}",

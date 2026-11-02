@@ -11,7 +11,7 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 
 ### Changed
 - Saving a password where no keyring is reachable (WSL, a bare X session, SSH: no Secret Service on the session bus) now explains that and how to get one, and offers to go on without saving: connect, add or edit the server with the password kept for the session only.
-- An iDRAC that refuses its name with "Access Error: 400 -- Bad Request" (the Host header check, on by default since iDRAC 8 firmware 2.81 and iDRAC 9 firmware 5.10 as part of the CVE-2021-21510 fix) no longer produces a raw HTML dump. The tab explains why, lists the racadm fixes (`DNSRacName`/`DNSDomainName`, `ManualDNSEntry`, and when disabling `HostHeaderCheck` is justified) and, once the name resolves, offers a **Connect by IP Address** button. The Health tab and log export report the same explanation.
+- An iDRAC that refuses its name with "Access Error: 400 -- Bad Request" (the Host header check, on by default since iDRAC 8 firmware 2.81 and iDRAC 9 firmware 5.10 as part of the CVE-2021-21510 fix) no longer produces a raw HTML dump. The tab explains why, lists the racadm fixes (`DNSRacName`/`DNSDomainName`, `ManualDNSEntry`, and when disabling `HostHeaderCheck` is justified) and, once the name resolves, offers a **Connect by IP Address** button. The Health & SEL tab shows the same page (instead of the explanation squeezed into its status lines) with the same button. The Health tab and log export report the same explanation.
 
 ## 2026-11-02 (v0.4.1)
 
