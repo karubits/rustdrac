@@ -48,6 +48,121 @@ pub enum Auth {
     },
 }
 
+/// The iDRAC refused the request because of the name it was addressed by.
+///
+/// iDRAC 9 firmware 5.10 and later validates the HTTP `Host` header
+/// (`idrac.webserver.HostHeaderCheck`, on by default) as part of Dell's fix for the host
+/// header injection flaw CVE-2021-21510 (DSA-2021-041). Any request whose `Host` is not
+/// the iDRAC's IP address, its RAC name / DNS name or an entry of its
+/// `ManualDNSEntry` allow-list gets `Access Error: 400 -- Bad Request`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostHeaderRejected {
+    pub host: String,
+}
+
+impl HostHeaderRejected {
+    /// The host without any port.
+    fn name(&self) -> &str {
+        match self.host.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => &self.host,
+        }
+    }
+
+    /// An iDRAC always accepts its own IP address, so a refused IP literal means something
+    /// in between rewrites the Host header, or this is not an iDRAC.
+    pub fn is_ip(&self) -> bool {
+        self.name().parse::<std::net::IpAddr>().is_ok()
+    }
+
+    /// Why the iDRAC answers this way.
+    pub fn why(&self) -> String {
+        if self.is_ip() {
+            return format!(
+                "An iDRAC answers this way when the HTTP Host header is not a name it knows \
+                 (its Host header check, idrac.webserver.HostHeaderCheck, is on by default \
+                 since iDRAC 9 firmware 5.10), but it always accepts its own IP address. So \
+                 something between here and {} rewrites the Host header (a proxy or port \
+                 forward), or that address is not an iDRAC.",
+                self.host
+            );
+        }
+        format!(
+            "The iDRAC rejected the name \"{}\": its HTTP Host header check is on \
+             (idrac.webserver.HostHeaderCheck, the default since iDRAC 9 firmware 5.10). \
+             Dell added it with the fix for CVE-2021-21510 (DSA-2021-041), a host header \
+             injection flaw: a request addressed to a name the iDRAC does not know could \
+             poison caches or redirect users, so it only answers to its IP addresses, its \
+             RAC name and DNS name (iDRAC.NIC.DNSRacName + DNSDomainName; by default \
+             idrac-<service tag>) and the names in idrac.webserver.ManualDNSEntry. The \
+             TLS certificate plays no part in this. Its IP address still works.",
+            self.host
+        )
+    }
+
+    /// Ways to make the name work, as (what to do, racadm commands). Run them over SSH to
+    /// the iDRAC's IP address (racadm is built in) or from a host with Dell's racadm.
+    pub fn fixes(&self) -> Vec<(String, Vec<String>)> {
+        if self.is_ip() {
+            return Vec::new();
+        }
+        // Without any port: the iDRAC's names never carry one.
+        let host = self.name();
+        let (name, domain) = match host.split_once('.') {
+            Some((n, d)) => (n.to_string(), d.to_string()),
+            None => (host.to_string(), "example.com".to_string()),
+        };
+        vec![
+            (
+                "Give the iDRAC this name, so the FQDN matches:".to_string(),
+                vec![
+                    format!("racadm set iDRAC.NIC.DNSRacName {name}"),
+                    format!("racadm set iDRAC.NIC.DNSDomainName {domain}"),
+                ],
+            ),
+            (
+                "Or allow it as an extra name (up to four, comma-separated; aliases, \
+                 short names and NAT addresses go here too):"
+                    .to_string(),
+                vec![format!(
+                    "racadm set idrac.webserver.ManualDNSEntry {host},{name}"
+                )],
+            ),
+            (
+                "Turning the check off is only justified for iDRAC Service Module host \
+                 routes, or firmware where ManualDNSEntry is ignored (update it first):"
+                    .to_string(),
+                vec!["racadm set idrac.webserver.HostHeaderCheck 0".to_string()],
+            ),
+        ]
+    }
+}
+
+impl std::fmt::Display for HostHeaderRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: Access Error: 400 -- Bad Request\n\n{}",
+            self.host,
+            self.why()
+        )?;
+        for (what, commands) in self.fixes() {
+            write!(f, "\n\n{what}")?;
+            for c in commands {
+                write!(f, "\n    {c}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for HostHeaderRejected {}
+
+/// Whether an HTTP reply is the host header check's refusal.
+pub fn host_header_rejected(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::BAD_REQUEST && body.contains("Access Error: 400 -- Bad Request")
+}
+
 /// Fields of the XML document returned by `POST /data/login`.
 #[derive(Debug, PartialEq)]
 struct LoginReply {
@@ -100,7 +215,14 @@ fn login8(client: &Client, host: &str, user: &str, password: &str) -> Result<Ses
         .cookies()
         .find(|c| c.name() == SESSION_COOKIE)
         .map(|c| c.value().to_string());
+    let status = resp.status();
     let body = resp.text().context("reading login reply")?;
+    if host_header_rejected(status, &body) {
+        return Err(HostHeaderRejected {
+            host: host.to_string(),
+        }
+        .into());
+    }
     let reply = parse_login_reply(&body)?;
 
     if reply.auth_result != 0 {
@@ -177,7 +299,16 @@ fn login9(client: &Client, host: &str, user: &str, password: &str) -> Result<Ses
         .cookies()
         .find(|c| c.name() == SESSION_COOKIE)
         .map(|c| c.value().to_string());
-    let reply: serde_json::Value = resp.json().context("reading login reply")?;
+    let status = resp.status();
+    let body = resp.text().context("reading login reply")?;
+    if host_header_rejected(status, &body) {
+        return Err(HostHeaderRejected {
+            host: host.to_string(),
+        }
+        .into());
+    }
+    let reply: serde_json::Value =
+        serde_json::from_str(&body).with_context(|| format!("unexpected login reply: {body}"))?;
     let auth_result = reply["authResult"].as_i64().unwrap_or(-1);
     if auth_result != 0 {
         let msg = match auth_result {
@@ -437,6 +568,35 @@ fn parse_tokens(forward_url: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_header_refusal_is_recognised_and_explained() {
+        use super::*;
+        let body = "<html><body><h2>Access Error: 400 -- Bad Request</h2></body></html>";
+        assert!(host_header_rejected(reqwest::StatusCode::BAD_REQUEST, body));
+        assert!(!host_header_rejected(reqwest::StatusCode::OK, body));
+        assert!(!host_header_rejected(
+            reqwest::StatusCode::BAD_REQUEST,
+            "nope"
+        ));
+        let e = HostHeaderRejected {
+            host: "tat-srvpm12.oob.mujin.co.jp".into(),
+        };
+        let text = e.to_string();
+        assert!(text.contains("CVE-2021-21510"));
+        assert!(text.contains("racadm set iDRAC.NIC.DNSRacName tat-srvpm12"));
+        assert!(text.contains("racadm set iDRAC.NIC.DNSDomainName oob.mujin.co.jp"));
+        assert!(text.contains(
+            "racadm set idrac.webserver.ManualDNSEntry tat-srvpm12.oob.mujin.co.jp,tat-srvpm12"
+        ));
+        assert!(text.contains("HostHeaderCheck 0"));
+        let by_ip = HostHeaderRejected {
+            host: "10.2.31.189:8443".into(),
+        };
+        assert!(by_ip.is_ip());
+        assert!(by_ip.fixes().is_empty());
+        assert!(by_ip.to_string().contains("proxy"));
+    }
+
     use super::*;
 
     #[test]

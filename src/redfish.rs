@@ -307,6 +307,14 @@ impl Redfish {
             .text()
             .with_context(|| format!("reading {path}"))
             .map_err(GetError::Transient)?;
+        if crate::idrac::host_header_rejected(status, &body) {
+            return Err(GetError::Fatal(
+                crate::idrac::HostHeaderRejected {
+                    host: self.host.clone(),
+                }
+                .into(),
+            ));
+        }
         if !status.is_success() {
             return Err(GetError::Transient(anyhow::anyhow!(
                 "GET {path}: HTTP {status}"

@@ -201,6 +201,19 @@ Note: the iDRAC 8 only serves gzip-compressed static files, so a client that doe
 
 Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query string is answered with a redirect and then HTTP 501, so the app reads collections member by member there. The SEL is `Systems/1/LogServices/Log1`; the maintenance event log (`Managers/1/LogServices/Log1`) takes the place of Dell's Lifecycle log in the export.
 
+## Troubleshooting
+
+**"Access Error: 400 -- Bad Request" from an iDRAC reached by name.** Since firmware 5.10, iDRAC 9 validates the HTTP `Host` header (`idrac.webserver.HostHeaderCheck`, on by default; Dell added it with the fix for the host header injection flaw [CVE-2021-21510](https://www.dell.com/support/kbdoc/en-us/000183758), DSA-2021-041). It answers only to its IP addresses, its RAC name and DNS name (`iDRAC.NIC.DNSRacName` + `DNSDomainName`, by default `idrac-<service tag>`) and the names in `idrac.webserver.ManualDNSEntry`; any other name, such as a CNAME or a short name, gets the 400. The TLS certificate is unrelated. Rust Drac explains this on the tab, offers to connect to the resolved IP address instead, and shows the fixes, which are run on the iDRAC (racadm over SSH to its IP address):
+
+```sh
+racadm set iDRAC.NIC.DNSRacName <name>                    # make the FQDN you use match
+racadm set iDRAC.NIC.DNSDomainName <domain>
+racadm set idrac.webserver.ManualDNSEntry <fqdn>,<alias>  # or allow up to four extra names / IPs
+racadm set idrac.webserver.HostHeaderCheck 0              # only for iSM host routes or firmware that ignores ManualDNSEntry
+```
+
+Dell's notes: [HTTP/HTTPS FQDN connection failures on iDRAC9 5.10](https://www.dell.com/support/kbdoc/en-us/000193619) and [HostHeaderCheck default reverted after a firmware update](https://www.dell.com/support/kbdoc/en-us/000199426).
+
 ## Build from source
 
 ### Linux

@@ -120,7 +120,14 @@ pub fn platform(client: &Client, host: &str) -> Result<Platform> {
         .send()
         .with_context(|| format!("connecting to https://{host}"))?;
     let path = resp.url().path().to_string();
+    let status = resp.status();
     let body = resp.text().unwrap_or_default();
+    if idrac::host_header_rejected(status, &body) {
+        return Err(idrac::HostHeaderRejected {
+            host: host.to_string(),
+        }
+        .into());
+    }
     let platform = platform_from(&path, &body);
     platforms()
         .lock()

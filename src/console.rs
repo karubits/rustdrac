@@ -10,6 +10,7 @@ use gtk::prelude::*;
 use reqwest::blocking::Client;
 
 use crate::bmc;
+use crate::idrac::HostHeaderRejected;
 use crate::webview::{self, ConsoleView};
 
 const LANG: &str = "en";
@@ -55,7 +56,7 @@ enum State {
 }
 
 struct Inner {
-    target: Target,
+    target: RefCell<Target>,
     client: Client,
     hooks: Hooks,
     state: RefCell<State>,
@@ -63,6 +64,10 @@ struct Inner {
     stack: gtk::Stack,
     status: gtk::Label,
     error: gtk::Label,
+    /// "Connect by IP address": shown when the BMC refused the host name.
+    by_ip: gtk::Button,
+    /// What that button connects to.
+    ip: RefCell<Option<String>>,
     spinner: gtk::Spinner,
     tab_label: gtk::Label,
     tab_spinner: gtk::Spinner,
@@ -249,9 +254,12 @@ impl ConsoleTab {
         let retry = gtk::Button::with_label("Retry");
         retry.style_context().add_class("suggested-action");
         let close = gtk::Button::with_label("Close Tab");
+        let by_ip = gtk::Button::with_label("Connect by IP Address");
+        by_ip.set_no_show_all(true);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         buttons.set_halign(gtk::Align::Center);
         buttons.add(&retry);
+        buttons.add(&by_ip);
         buttons.add(&close);
         let failed = centered_box();
         failed.add(&gtk::Image::from_icon_name(
@@ -303,13 +311,15 @@ impl ConsoleTab {
 
         let this = ConsoleTab(Rc::new(Inner {
             title: RefCell::new(target.name.clone()),
-            target,
+            target: RefCell::new(target),
             client,
             hooks,
             state: RefCell::new(State::Connecting),
             stack,
             status,
             error,
+            by_ip,
+            ip: RefCell::new(None),
             spinner,
             tab_label,
             tab_spinner,
@@ -333,6 +343,12 @@ impl ConsoleTab {
         retry.connect_clicked(move |_| {
             if let Some(tab) = upgrade(&weak) {
                 tab.connect();
+            }
+        });
+        let weak = this.downgrade();
+        this.0.by_ip.connect_clicked(move |_| {
+            if let Some(tab) = upgrade(&weak) {
+                tab.connect_by_ip();
             }
         });
         for button in [&close, &tab_close] {
@@ -391,8 +407,8 @@ impl ConsoleTab {
         self.0.webview.borrow().clone()
     }
 
-    pub fn target(&self) -> &Target {
-        &self.0.target
+    pub fn target(&self) -> Target {
+        self.0.target.borrow().clone()
     }
 
     /// Learned from Redfish on connect; empty until then.
@@ -462,15 +478,16 @@ impl ConsoleTab {
     }
 
     fn connect(&self) {
-        let t = &self.0.target;
+        let target = self.target();
         *self.0.state.borrow_mut() = State::Connecting;
-        self.0
-            .status
-            .set_text(&format!("Connecting to {} as {}…", t.host, t.user));
+        self.0.status.set_text(&format!(
+            "Connecting to {} as {}…",
+            target.host, target.user
+        ));
         self.0.stack.set_visible_child_name("connecting");
         self.set_busy(true);
 
-        let (client, target) = (self.0.client.clone(), t.clone());
+        let client = self.0.client.clone();
         let job = gtk::gio::spawn_blocking(move || connect_blocking(&client, &target));
         let weak = self.downgrade();
         glib::MainContext::default().spawn_local(async move {
@@ -497,13 +514,13 @@ impl ConsoleTab {
                 if let Some(identity) = &c.identity {
                     *self.0.service_tag.borrow_mut() = identity.service_tag.clone();
                     self.show_identity(identity);
-                    (self.0.hooks.on_identity)(&self.0.target, identity);
+                    (self.0.hooks.on_identity)(&self.target(), identity);
                 }
                 let title = c
                     .identity
                     .as_ref()
                     .and_then(|i| i.title())
-                    .unwrap_or_else(|| self.0.target.host.clone());
+                    .unwrap_or_else(|| self.target().host);
                 *self.0.title.borrow_mut() = title.clone();
                 (self.0.hooks.on_title)(&self.widget(), &title);
 
@@ -553,10 +570,96 @@ impl ConsoleTab {
     }
 
     fn show_error(&self, e: &anyhow::Error) {
-        eprintln!("rustdrac: {}: {e:#}", self.0.target.host);
+        let host = self.target().host;
+        eprintln!("rustdrac: {host}: {e:#}");
         *self.0.state.borrow_mut() = State::Failed;
-        self.0.error.set_text(&format!("{e:#}"));
+        self.0.by_ip.hide();
         self.0.stack.set_visible_child_name("error");
+        let rejected = e
+            .chain()
+            .find_map(|c| c.downcast_ref::<HostHeaderRejected>());
+        let Some(rejected) = rejected else {
+            self.0.error.set_justify(gtk::Justification::Center);
+            self.0.error.style_context().add_class("error-message");
+            self.0.error.set_text(&format!("{e:#}"));
+            return;
+        };
+        // Prose, with only the commands in monospace.
+        self.0.error.set_justify(gtk::Justification::Left);
+        self.0.error.style_context().remove_class("error-message");
+        self.0.error.set_markup(&host_header_markup(rejected));
+        if split_port(&host).0.parse::<std::net::IpAddr>().is_ok() {
+            return;
+        }
+        // Offer the IP address instead: resolve the name off the main loop first.
+        let name = host.clone();
+        let job = gtk::gio::spawn_blocking(move || resolve(&name));
+        let weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let ip = job.await.unwrap_or(None);
+            let Some(tab) = upgrade(&weak) else {
+                return;
+            };
+            if tab.target().host != host || !matches!(*tab.0.state.borrow(), State::Failed) {
+                return;
+            }
+            match ip {
+                Some(ip) => tab.offer_ip(&ip),
+                None => tab.0.error.set_markup(&format!(
+                    "{}\n\n<b>{} does not resolve here, so there is no IP address to try.</b>",
+                    host_header_markup(&HostHeaderRejected { host: host.clone() }),
+                    glib::markup_escape_text(&host)
+                )),
+            }
+        });
+    }
+
+    /// The host name resolved: show the button and ask right away.
+    fn offer_ip(&self, ip: &str) {
+        *self.0.ip.borrow_mut() = Some(ip.to_string());
+        self.0
+            .by_ip
+            .set_label(&format!("Connect by IP Address ({ip})"));
+        self.0.by_ip.show();
+        let host = self.target().host;
+        let dialog = gtk::MessageDialog::new(
+            self.parent_window().as_ref(),
+            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+            gtk::MessageType::Question,
+            gtk::ButtonsType::YesNo,
+            &format!(
+                "{host} refused the connection: the iDRAC's Host header check does not know \
+                 that name.\n\nConnect to its IP address {ip} instead?"
+            ),
+        );
+        dialog.set_title("Rust Drac");
+        dialog.set_default_response(gtk::ResponseType::Yes);
+        let weak = self.downgrade();
+        dialog.connect_response(move |dialog, response| {
+            // SAFETY: the dialog is not used after this point.
+            unsafe { dialog.destroy() };
+            if response == gtk::ResponseType::Yes
+                && let Some(tab) = upgrade(&weak)
+            {
+                tab.connect_by_ip();
+            }
+        });
+        dialog.show();
+    }
+
+    /// Retry with the IP address the button names (the tab keeps its name).
+    fn connect_by_ip(&self) {
+        let Some(ip) = self.0.ip.borrow_mut().take() else {
+            return;
+        };
+        self.0.address.set(&ip);
+        self.0.target.borrow_mut().host = ip;
+        self.0.by_ip.hide();
+        self.connect();
+    }
+
+    fn parent_window(&self) -> Option<gtk::Window> {
+        self.0.page.toplevel().and_then(|w| w.downcast().ok())
     }
 
     /// The view gave up on the page: log out so the BMC session is not left open, and
@@ -602,7 +705,7 @@ impl ConsoleTab {
             } => {
                 self.0
                     .tab_label
-                    .set_text(&format!("{} (closing)", self.0.target.name));
+                    .set_text(&format!("{} (closing)", self.target().name));
                 self.set_busy(true);
                 if let Some(view) = self.view() {
                     match disconnect_js {
@@ -649,6 +752,51 @@ impl ConsoleTab {
     }
 }
 
+/// The host header refusal as a readable error page: why, then the fixes with their
+/// commands in monospace.
+fn host_header_markup(rejected: &HostHeaderRejected) -> String {
+    let esc = glib::markup_escape_text;
+    let mut out = format!(
+        "<b>{} answered \"Access Error: 400 -- Bad Request\".</b>\n\n{}",
+        esc(&rejected.host),
+        esc(&rejected.why())
+    );
+    for (what, commands) in rejected.fixes() {
+        out += &format!("\n\n{}", esc(&what));
+        for c in commands {
+            out += &format!("\n<tt>  {}</tt>", esc(&c));
+        }
+    }
+    out
+}
+
+/// "host:port" → ("host", Some("port")); anything else is all host.
+fn split_port(host: &str) -> (&str, Option<&str>) {
+    match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            (name, Some(port))
+        }
+        _ => (host, None),
+    }
+}
+
+/// The first IPv4 address (else IPv6) `host` resolves to, as text, keeping any port.
+fn resolve(host: &str) -> Option<String> {
+    use std::net::ToSocketAddrs;
+    let (name, port) = split_port(host);
+    let addrs: Vec<_> = (name, 443).to_socket_addrs().ok()?.collect();
+    let ip = addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .map(|a| a.ip())?;
+    Some(match (ip, port) {
+        (std::net::IpAddr::V6(v6), Some(p)) => format!("[{v6}]:{p}"),
+        (ip, Some(p)) => format!("{ip}:{p}"),
+        (ip, None) => ip.to_string(),
+    })
+}
+
 fn decode_png_data_url(url: &str) -> Option<Vec<u8>> {
     use base64::Engine;
     let b64 = url.strip_prefix("data:image/png;base64,")?;
@@ -689,5 +837,22 @@ fn connect_blocking(client: &Client, target: &Target) -> Result<Connected> {
             let _ = bmc::logout(client, &session);
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ports_are_split_off_and_kept() {
+        assert_eq!(split_port("bmc.example.com"), ("bmc.example.com", None));
+        assert_eq!(
+            split_port("bmc.example.com:8443"),
+            ("bmc.example.com", Some("8443"))
+        );
+        assert_eq!(split_port("10.0.0.1:x"), ("10.0.0.1:x", None));
+        assert_eq!(resolve("localhost:8443").as_deref(), Some("127.0.0.1:8443"));
+        assert_eq!(resolve("localhost").as_deref(), Some("127.0.0.1"));
     }
 }
