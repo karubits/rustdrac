@@ -50,9 +50,9 @@ pub enum Auth {
 
 /// The iDRAC refused the request because of the name it was addressed by.
 ///
-/// iDRAC 9 firmware 5.10 and later validates the HTTP `Host` header
-/// (`idrac.webserver.HostHeaderCheck`, on by default) as part of Dell's fix for the host
-/// header injection flaw CVE-2021-21510 (DSA-2021-041). Any request whose `Host` is not
+/// iDRAC 8 firmware 2.81 and iDRAC 9 firmware 5.10 and later validate the HTTP `Host`
+/// header (`idrac.webserver.HostHeaderCheck`, on by default) as part of Dell's fix for
+/// the host header injection flaw CVE-2021-21510 (DSA-2021-041). Any request whose `Host` is not
 /// the iDRAC's IP address, its RAC name / DNS name or an entry of its
 /// `ManualDNSEntry` allow-list gets `Access Error: 400 -- Bad Request`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +81,8 @@ impl HostHeaderRejected {
             return format!(
                 "An iDRAC answers this way when the HTTP Host header is not a name it knows \
                  (its Host header check, idrac.webserver.HostHeaderCheck, is on by default \
-                 since iDRAC 9 firmware 5.10), but it always accepts its own IP address. So \
+                 since iDRAC 8 firmware 2.81 and iDRAC 9 firmware 5.10), but it always \
+                 accepts its own IP address. So \
                  something between here and {} rewrites the Host header (a proxy or port \
                  forward), or that address is not an iDRAC.",
                 self.host
@@ -89,7 +90,8 @@ impl HostHeaderRejected {
         }
         format!(
             "The iDRAC rejected the name \"{}\": its HTTP Host header check is on \
-             (idrac.webserver.HostHeaderCheck, the default since iDRAC 9 firmware 5.10). \
+             (idrac.webserver.HostHeaderCheck, the default since iDRAC 8 firmware 2.81 and \
+             iDRAC 9 firmware 5.10). \
              Dell added it with the fix for CVE-2021-21510 (DSA-2021-041), a host header \
              injection flaw: a request addressed to a name the iDRAC does not know could \
              poison caches or redirect users, so it only answers to its IP addresses, its \

@@ -11,7 +11,22 @@ use reqwest::blocking::Client;
 
 use crate::bmc;
 use crate::idrac::HostHeaderRejected;
+use crate::redfish::{self, Redfish};
+use crate::theme;
 use crate::webview::{self, ConsoleView};
+
+/// The power menu: label, Redfish `ResetType`, and whether to ask first.
+const POWER_ACTIONS: [(&str, &str, bool); 6] = [
+    ("Power On", "On", false),
+    ("Graceful Shutdown", "GracefulShutdown", true),
+    ("Force Off", "ForceOff", true),
+    ("Reset (force restart)", "ForceRestart", true),
+    ("Graceful Restart", "GracefulRestart", true),
+    ("Power Cycle", "PowerCycle", true),
+];
+
+/// How long after a power action to read the state back (the BMC lags a little).
+const POWER_REFRESH: [Duration; 2] = [Duration::from_secs(3), Duration::from_secs(15)];
 
 const LANG: &str = "en";
 
@@ -80,6 +95,13 @@ struct Inner {
     serial: Chip,
     address: Chip,
     vendor: gtk::Label,
+    /// Power state and actions (Redfish); shown once the server is identified.
+    power: gtk::Button,
+    power_menu: gtk::Menu,
+    power_label: gtk::Label,
+    power_items: Vec<gtk::MenuItem>,
+    power_state: RefCell<redfish::Power>,
+    redfish: RefCell<Option<Redfish>>,
 }
 
 #[derive(Clone)]
@@ -298,12 +320,47 @@ impl ConsoleTab {
         copy_all.set_tooltip_text(Some("Copy model, serial and address"));
         let vendor = gtk::Label::new(None);
         vendor.style_context().add_class("caption");
+
+        // Power: "⏻ On ▾" with the reset actions in its menu.
+        let power_label = gtk::Label::new(None);
+        power_label.set_use_markup(true);
+        let power_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        power_content.add(&gtk::Image::from_icon_name(
+            Some("system-shutdown-symbolic"),
+            gtk::IconSize::Menu,
+        ));
+        power_content.add(&power_label);
+        power_content.add(&gtk::Image::from_icon_name(
+            Some("pan-down-symbolic"),
+            gtk::IconSize::Menu,
+        ));
+        let power = gtk::Button::new();
+        power.add(&power_content);
+        // Hidden until the server is identified; its children stay shown.
+        power_content.show_all();
+        power.set_relief(gtk::ReliefStyle::None);
+        power.set_focus_on_click(false);
+        power.set_tooltip_text(Some("Server power (via Redfish)"));
+        power.set_no_show_all(true);
+        let power_menu = gtk::Menu::new();
+        let power_items: Vec<gtk::MenuItem> = POWER_ACTIONS
+            .iter()
+            .map(|(label, _, _)| {
+                let item = gtk::MenuItem::with_label(label);
+                power_menu.append(&item);
+                item
+            })
+            .collect();
+        power_menu.show_all();
+
         let info = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         info.style_context().add_class("console-info");
         for chip in [&model, &serial, &address] {
             info.add(chip.button());
         }
         info.add(&copy_all);
+        info.add(&gtk::Separator::new(gtk::Orientation::Vertical));
+        info.add(&power);
         info.pack_end(&vendor, false, false, 6);
         let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         page.pack_start(&info, false, false, 0);
@@ -331,7 +388,35 @@ impl ConsoleTab {
             serial,
             address,
             vendor,
+            power,
+            power_menu,
+            power_label,
+            power_items,
+            power_state: RefCell::new(redfish::Power::default()),
+            redfish: RefCell::new(None),
         }));
+
+        for (item, (label, reset_type, confirm)) in this.0.power_items.iter().zip(POWER_ACTIONS) {
+            let weak = this.downgrade();
+            item.connect_activate(move |_| {
+                if let Some(tab) = upgrade(&weak) {
+                    tab.power_action(label, reset_type, confirm);
+                }
+            });
+        }
+        // Open the menu below the button and re-read the state meanwhile.
+        let weak = this.downgrade();
+        this.0.power.connect_clicked(move |button| {
+            if let Some(tab) = upgrade(&weak) {
+                tab.refresh_power();
+                tab.0.power_menu.popup_at_widget(
+                    button,
+                    gtk::gdk::Gravity::SouthWest,
+                    gtk::gdk::Gravity::NorthWest,
+                    None,
+                );
+            }
+        });
 
         let weak = this.downgrade();
         copy_all.connect_clicked(move |_| {
@@ -382,6 +467,129 @@ impl ConsoleTab {
         self.0.serial.set(&identity.service_tag);
         self.0.address.set_caption(identity.vendor.bmc_name());
         self.0.vendor.set_text(identity.vendor.label());
+        self.set_power(&identity.power);
+        self.0.power.show();
+    }
+
+    fn set_power(&self, p: &redfish::Power) {
+        let (color, text) = match p.state.as_str() {
+            "On" => ("#3fb950", "On"),
+            "Off" => ("#8b949e", "Off"),
+            "" => ("#8b949e", "unknown"),
+            other => ("#e3b341", other),
+        };
+        self.0
+            .power_label
+            .set_markup(&theme::dot_markup(color, text));
+        for (item, (_, reset_type, _)) in self.0.power_items.iter().zip(POWER_ACTIONS) {
+            let fits = match p.state.as_str() {
+                "On" => reset_type != "On",
+                "Off" => reset_type == "On",
+                _ => true,
+            };
+            item.set_sensitive(fits && p.allows(reset_type));
+        }
+        *self.0.power_state.borrow_mut() = p.clone();
+    }
+
+    /// Reads the power state again in the background.
+    fn refresh_power(&self) {
+        let Some(redfish) = self.0.redfish.borrow().clone() else {
+            return;
+        };
+        let job = gtk::gio::spawn_blocking(move || redfish.power());
+        let weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            match job.await {
+                Ok(Ok(p)) => {
+                    if let Some(tab) = upgrade(&weak) {
+                        tab.set_power(&p);
+                    }
+                }
+                Ok(Err(e)) => eprintln!("rustdrac: {e:#}"),
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// A power menu item: ask first for anything but Power On, then act.
+    fn power_action(&self, label: &'static str, reset_type: &'static str, confirm: bool) {
+        if !confirm {
+            return self.run_power(label, reset_type);
+        }
+        let target = self.target();
+        let what = [self.0.model.text(), self.0.serial.text()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = match reset_type {
+            "GracefulShutdown" => "The operating system is asked to shut down.",
+            "GracefulRestart" => "The operating system is asked to restart.",
+            "ForceOff" => "Power is cut without shutting the operating system down.",
+            "ForceRestart" => "The server resets without shutting the operating system down.",
+            "PowerCycle" => "Power is cut and restored without shutting the operating system down.",
+            _ => "",
+        };
+        let dialog = gtk::MessageDialog::new(
+            self.parent_window().as_ref(),
+            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+            gtk::MessageType::Question,
+            gtk::ButtonsType::YesNo,
+            &format!("{label}: {} ({what})?", target.name),
+        );
+        dialog.set_secondary_text(Some(
+            format!("{detail} The console stays open.").trim_start(),
+        ));
+        dialog.set_title("Rust Drac");
+        dialog.set_default_response(gtk::ResponseType::No);
+        let weak = self.downgrade();
+        dialog.connect_response(move |dialog, response| {
+            // SAFETY: the dialog is not used after this point.
+            unsafe { dialog.destroy() };
+            if response == gtk::ResponseType::Yes
+                && let Some(tab) = upgrade(&weak)
+            {
+                tab.run_power(label, reset_type);
+            }
+        });
+        dialog.show();
+    }
+
+    fn run_power(&self, label: &'static str, reset_type: &'static str) {
+        let Some(redfish) = self.0.redfish.borrow().clone() else {
+            return;
+        };
+        self.0
+            .power_label
+            .set_markup(&theme::dot_markup("#e3b341", &format!("{label}…")));
+        self.0.power.set_sensitive(false);
+        let job = gtk::gio::spawn_blocking(move || redfish.reset(reset_type));
+        let weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(tab) = upgrade(&weak) else {
+                return;
+            };
+            tab.0.power.set_sensitive(true);
+            match job.await {
+                Ok(Ok(())) => {
+                    for delay in POWER_REFRESH {
+                        let weak = tab.downgrade();
+                        glib::timeout_add_local_once(delay, move || {
+                            if let Some(tab) = upgrade(&weak) {
+                                tab.refresh_power();
+                            }
+                        });
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("rustdrac: {e:#}");
+                    tab.refresh_power();
+                    crate::manager::error_dialog(tab.parent_window().as_ref(), &format!("{e:#}"));
+                }
+                Err(_) => tab.refresh_power(),
+            }
+        });
     }
 
     /// "PowerEdge R630, 76G2F42, 10.2.31.211" (whatever is known) to the clipboard.
@@ -511,6 +719,11 @@ impl ConsoleTab {
             Err(_) if closing => self.finish(),
             Err(e) => self.show_error(&e),
             Ok(c) => {
+                let target = self.target();
+                *self.0.redfish.borrow_mut() = Some(
+                    Redfish::new(&self.0.client, &target.host, &target.user, &target.password)
+                        .with_vendor(Some(c.session.vendor())),
+                );
                 if let Some(identity) = &c.identity {
                     *self.0.service_tag.borrow_mut() = identity.service_tag.clone();
                     self.show_identity(identity);

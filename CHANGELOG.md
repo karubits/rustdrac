@@ -6,8 +6,11 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 
 ## Unreleased
 
+### Added
+- Console tabs have a power button showing the server's power state, with **Power On**, **Graceful Shutdown**, **Force Off**, **Reset**, **Graceful Restart** and **Power Cycle** (Redfish `ComputerSystem.Reset`). Only actions the BMC offers are enabled, everything but Power On asks first, and the state is read back afterwards.
+
 ### Changed
-- An iDRAC that refuses its name with "Access Error: 400 -- Bad Request" (the iDRAC 9 Host header check, on by default since firmware 5.10 as part of the CVE-2021-21510 fix) no longer produces a raw HTML dump. The tab explains why, lists the racadm fixes (`DNSRacName`/`DNSDomainName`, `ManualDNSEntry`, and when disabling `HostHeaderCheck` is justified), and offers to connect to the resolved IP address instead, with a **Connect by IP Address** button for later. The Health tab and log export report the same explanation.
+- An iDRAC that refuses its name with "Access Error: 400 -- Bad Request" (the Host header check, on by default since iDRAC 8 firmware 2.81 and iDRAC 9 firmware 5.10 as part of the CVE-2021-21510 fix) no longer produces a raw HTML dump. The tab explains why, lists the racadm fixes (`DNSRacName`/`DNSDomainName`, `ManualDNSEntry`, and when disabling `HostHeaderCheck` is justified), and offers to connect to the resolved IP address instead, with a **Connect by IP Address** button for later. The Health tab and log export report the same explanation.
 
 ## 2026-11-02 (v0.4.1)
 

@@ -89,7 +89,7 @@ The first tab is an address book:
 - **Vendor, service tag (Supermicro: serial number) and model** are filled in automatically from Redfish the first time you connect.
 - **Quick Connect** opens a one-off console, which you can optionally add to the address book.
 
-Each console opens in its own tab. A strip above the viewer shows the server's model, service tag or serial and the BMC address; click any of them to copy it, or the copy button for all three on one line. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button (iDRAC) or exit hotkey (Supermicro). Either way the app first disconnects the KVM the way the viewer's own button does, then logs out. Without this an iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
+Each console opens in its own tab. A strip above the viewer shows the server's model, service tag or serial and the BMC address; click any of them to copy it, or the copy button for all three on one line. Next to them, the power button shows the server's power state and opens a menu with **Power On**, **Graceful Shutdown**, **Force Off**, **Reset**, **Graceful Restart** and **Power Cycle** (Redfish `ComputerSystem.Reset`; only the actions the BMC offers are enabled, and everything but Power On asks first). The console stays connected through a reset. To close one, use the tab's ✕ or the viewer's **Disconnect Viewer** button (iDRAC) or exit hotkey (Supermicro). Either way the app first disconnects the KVM the way the viewer's own button does, then logs out. Without this an iDRAC keeps the console session, and the next connect asks "A session to this device already exists. Do you want to try to share this session?" Closing the window does the same for every open tab.
 
 ![Virtual console in a tab](docs/screenshots/console.png)
 
@@ -203,7 +203,7 @@ Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query
 
 ## Troubleshooting
 
-**"Access Error: 400 -- Bad Request" from an iDRAC reached by name.** Since firmware 5.10, iDRAC 9 validates the HTTP `Host` header (`idrac.webserver.HostHeaderCheck`, on by default; Dell added it with the fix for the host header injection flaw [CVE-2021-21510](https://www.dell.com/support/kbdoc/en-us/000183758), DSA-2021-041). It answers only to its IP addresses, its RAC name and DNS name (`iDRAC.NIC.DNSRacName` + `DNSDomainName`, by default `idrac-<service tag>`) and the names in `idrac.webserver.ManualDNSEntry`; any other name, such as a CNAME or a short name, gets the 400. The TLS certificate is unrelated. Rust Drac explains this on the tab, offers to connect to the resolved IP address instead, and shows the fixes, which are run on the iDRAC (racadm over SSH to its IP address):
+**"Access Error: 400 -- Bad Request" from an iDRAC reached by name.** Since firmware 2.81 (iDRAC 8) and 5.10 (iDRAC 9), the iDRAC validates the HTTP `Host` header (`idrac.webserver.HostHeaderCheck`, on by default; Dell added it with the fix for the host header injection flaw [CVE-2021-21510](https://www.dell.com/support/kbdoc/en-us/000183758), DSA-2021-041). It answers only to its IP addresses, its RAC name and DNS name (`iDRAC.NIC.DNSRacName` + `DNSDomainName`, by default `idrac-<service tag>`) and the names in `idrac.webserver.ManualDNSEntry`; any other name, such as a CNAME or a short name, gets the 400. The TLS certificate is unrelated. Rust Drac explains this on the tab, offers to connect to the resolved IP address instead, and shows the fixes, which are run on the iDRAC (racadm over SSH to its IP address):
 
 ```sh
 racadm set iDRAC.NIC.DNSRacName <name>                    # make the FQDN you use match
@@ -212,7 +212,7 @@ racadm set idrac.webserver.ManualDNSEntry <fqdn>,<alias>  # or allow up to four 
 racadm set idrac.webserver.HostHeaderCheck 0              # only for iSM host routes or firmware that ignores ManualDNSEntry
 ```
 
-Dell's notes: [HTTP/HTTPS FQDN connection failures on iDRAC9 5.10](https://www.dell.com/support/kbdoc/en-us/000193619) and [HostHeaderCheck default reverted after a firmware update](https://www.dell.com/support/kbdoc/en-us/000199426).
+Dell's notes: [iDRAC8 2.81 FQDN connection failures](https://www.dell.com/support/kbdoc/en-us/000189996), [HTTP/HTTPS FQDN connection failures on iDRAC9 5.10](https://www.dell.com/support/kbdoc/en-us/000193619) and [HostHeaderCheck default reverted after a firmware update](https://www.dell.com/support/kbdoc/en-us/000199426).
 
 ## Build from source
 

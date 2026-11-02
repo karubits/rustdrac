@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
@@ -527,6 +527,45 @@ impl Redfish {
         Ok(out)
     }
 
+    pub fn power(&self) -> Result<Power> {
+        Ok(power_of(&self.get(self.paths()?.system)?))
+    }
+
+    /// `ComputerSystem.Reset` with `reset_type` ("On", "ForceOff", "GracefulShutdown",
+    /// "ForceRestart", "GracefulRestart", "PowerCycle", …).
+    pub fn reset(&self, reset_type: &str) -> Result<()> {
+        let lock = host_lock(&self.host);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let resp = self
+            .client
+            .post(format!(
+                "https://{}{}/Actions/ComputerSystem.Reset",
+                self.host,
+                self.paths()?.system
+            ))
+            .basic_auth(&self.user, Some(&self.password))
+            .json(&serde_json::json!({ "ResetType": reset_type }))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .with_context(|| format!("{}: power action {reset_type}", self.host))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let body = resp.text().unwrap_or_default();
+        if crate::idrac::host_header_rejected(status, &body) {
+            return Err(crate::idrac::HostHeaderRejected {
+                host: self.host.clone(),
+            }
+            .into());
+        }
+        bail!(
+            "{}: power action {reset_type} refused: {}",
+            self.host,
+            redfish_error(status, &body)
+        );
+    }
+
     pub fn clear_sel(&self) -> Result<()> {
         self.client
             .post(format!(
@@ -542,6 +581,48 @@ impl Redfish {
             .error_for_status()
             .context("clearing the SEL")?;
         Ok(())
+    }
+}
+
+/// The system's power state and the reset types its BMC accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Power {
+    /// "On", "Off", "PoweringOn", "PoweringOff" or "" when unknown.
+    pub state: String,
+    /// `ResetType@Redfish.AllowableValues`; empty when the BMC does not say.
+    pub reset_types: Vec<String>,
+}
+
+impl Power {
+    pub fn allows(&self, reset_type: &str) -> bool {
+        self.reset_types.is_empty() || self.reset_types.iter().any(|t| t == reset_type)
+    }
+}
+
+/// [`Power`] from a Redfish `ComputerSystem` document.
+pub fn power_of(system: &Value) -> Power {
+    Power {
+        state: str_field(system, "PowerState"),
+        reset_types:
+            system["Actions"]["#ComputerSystem.Reset"]["ResetType@Redfish.AllowableValues"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect(),
+    }
+}
+
+/// The message of a Redfish error reply, if it has one, else the HTTP status.
+fn redfish_error(status: reqwest::StatusCode, body: &str) -> String {
+    let doc: Value = serde_json::from_str(body).unwrap_or_default();
+    let info = &doc["error"]["@Message.ExtendedInfo"][0];
+    let msg = str_field(info, "Message");
+    if msg.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        msg
     }
 }
 
@@ -784,6 +865,28 @@ pub fn sel_csv(entries: &[SelEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn power_info_and_errors_are_parsed() {
+        use super::*;
+        let sys = serde_json::json!({"PowerState": "On", "Actions": {"#ComputerSystem.Reset": {
+            "ResetType@Redfish.AllowableValues": ["On", "ForceOff", "GracefulRestart"]}}});
+        let p = power_of(&sys);
+        assert_eq!(p.state, "On");
+        assert!(p.allows("ForceOff"));
+        assert!(!p.allows("PowerCycle"));
+        assert!(Power::default().allows("PowerCycle"));
+        let body =
+            r#"{"error":{"@Message.ExtendedInfo":[{"Message":"Server is already powered ON."}]}}"#;
+        assert_eq!(
+            redfish_error(reqwest::StatusCode::CONFLICT, body),
+            "Server is already powered ON."
+        );
+        assert_eq!(
+            redfish_error(reqwest::StatusCode::CONFLICT, "nope"),
+            "HTTP 409 Conflict"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

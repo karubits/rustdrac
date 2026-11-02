@@ -212,6 +212,7 @@ pub struct Identity {
     /// Dell's service tag, or the system serial number elsewhere.
     pub service_tag: String,
     pub model: String,
+    pub power: redfish::Power,
 }
 
 impl Identity {
@@ -288,6 +289,7 @@ pub fn identity(
         vendor,
         service_tag: redfish::str_field(&sys, tag),
         model: redfish::str_field(&sys, "Model"),
+        power: redfish::power_of(&sys),
     };
     identity.title().map(|_| identity)
 }
@@ -341,6 +343,7 @@ mod tests {
             vendor: Vendor::Dell,
             service_tag: "ABC1234".into(),
             model: "PowerEdge R630".into(),
+            power: Default::default(),
         };
         assert_eq!(
             dell.title().as_deref(),
@@ -350,6 +353,7 @@ mod tests {
             vendor: Vendor::Supermicro,
             service_tag: "A328789X8A10489".into(),
             model: "SYS-2029BT-HNTR".into(),
+            power: Default::default(),
         };
         assert_eq!(
             smc.title().as_deref(),
