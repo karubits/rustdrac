@@ -159,9 +159,18 @@ impl Connection {
     }
 
     pub fn set_saved_password(&self, password: &str) -> Result<()> {
-        keyring_entry(&self.id)?
-            .set_password(password)
-            .context("saving password to the system keyring")
+        let result = keyring::Entry::new(KEYRING_SERVICE, &self.id)
+            .and_then(|entry| entry.set_password(password));
+        match result {
+            Ok(()) => Ok(()),
+            Err(e @ (keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_))) => {
+                Err(KeyringUnavailable {
+                    cause: e.to_string(),
+                }
+                .into())
+            }
+            Err(e) => Err(e).context("saving password to the system keyring"),
+        }
     }
 
     pub fn forget_password(&self) {
@@ -176,6 +185,49 @@ impl Connection {
 
 fn keyring_entry(id: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, id).context("opening the system keyring")
+}
+
+/// No keyring to save a password in: the user can still connect without saving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyringUnavailable {
+    pub cause: String,
+}
+
+impl KeyringUnavailable {
+    /// One line for a dialog title.
+    pub fn summary(&self) -> &'static str {
+        "No system keyring is available, so the password cannot be saved."
+    }
+
+    /// The cause and what to do about it.
+    pub fn details(&self) -> String {
+        #[cfg(unix)]
+        let help = "On Linux the password goes to the Secret Service (GNOME Keyring or \
+             KWallet) over the D-Bus session bus. Under WSL, on a bare X session or over SSH \
+             there is usually none. Install and start one, for example gnome-keyring \
+             (`gnome-keyring-daemon --start --components=secrets`), or leave \"Save \
+             password\" off: the password is then asked for when connecting and kept for \
+             the session.";
+        #[cfg(windows)]
+        let help = "The password goes to the Windows Credential Manager, which refused it. \
+             Leave \"Save password\" off: the password is then asked for when connecting \
+             and kept for the session.";
+        format!("{}.\n\n{help}", self.cause.trim_end_matches('.'))
+    }
+}
+
+impl std::fmt::Display for KeyringUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\n\n{}", self.summary(), self.details())
+    }
+}
+
+impl std::error::Error for KeyringUnavailable {}
+
+/// The [`KeyringUnavailable`] behind an error, if that is what it is.
+pub fn keyring_unavailable(e: &anyhow::Error) -> Option<&KeyringUnavailable> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<KeyringUnavailable>())
 }
 
 pub fn path() -> PathBuf {

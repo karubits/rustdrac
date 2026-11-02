@@ -31,7 +31,7 @@ use bmc::Vendor;
 use console::{ConsoleTab, Target};
 use health::HealthTab;
 use manager::Check;
-use manager::{Manager, error_dialog};
+use manager::{Manager, error_dialog, question_dialog};
 use redfish::{Health, Redfish};
 use store::{Connection, Store};
 
@@ -745,7 +745,21 @@ impl App {
                         store.save()
                     });
                     if let Err(e) = saved {
-                        error_dialog(Some(&self.0.window), &format!("{e:#}"));
+                        if let Some(k) = store::keyring_unavailable(&e) {
+                            if !question_dialog(
+                                Some(&self.0.window),
+                                k.summary(),
+                                &format!(
+                                    "{}\n\nConnect without saving the password? It is kept for this session.",
+                                    k.details()
+                                ),
+                                "Connect",
+                            ) {
+                                return None;
+                            }
+                        } else {
+                            error_dialog(Some(&self.0.window), &format!("{e:#}"));
+                        }
                     }
                     self.manager().refresh();
                 }
@@ -931,21 +945,40 @@ impl App {
         };
         let mut connection_id = None;
         if q.add_to_book {
-            let conn = Connection {
+            let mut conn = Connection {
                 id: store::new_id(),
                 address: q.host.clone(),
                 user: q.user.clone(),
                 save_password: q.save_password,
                 ..Default::default()
             };
-            let saved = (|| {
-                if q.save_password {
-                    conn.set_saved_password(&q.password)?;
+            let mut stored = if q.save_password {
+                conn.set_saved_password(&q.password)
+            } else {
+                Ok(())
+            };
+            if let Err(e) = &stored
+                && let Some(k) = store::keyring_unavailable(e)
+            {
+                if !question_dialog(
+                    Some(&self.0.window),
+                    k.summary(),
+                    &format!(
+                        "{}\n\nAdd the server without its password and connect? The password is kept for this session.",
+                        k.details()
+                    ),
+                    "Add and Connect",
+                ) {
+                    return;
                 }
+                conn.save_password = false;
+                stored = Ok(());
+            }
+            let saved = stored.and_then(|()| {
                 let mut store = self.0.store.borrow_mut();
                 store.upsert(conn.clone());
                 store.save()
-            })();
+            });
             if let Err(e) = saved {
                 error_dialog(Some(&self.0.window), &format!("{e:#}"));
             }

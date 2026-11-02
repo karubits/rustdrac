@@ -79,6 +79,7 @@ struct Inner {
     stack: gtk::Stack,
     status: gtk::Label,
     error: gtk::Label,
+    retry: gtk::Button,
     /// "Connect by IP address": shown when the BMC refused the host name.
     by_ip: gtk::Button,
     /// What that button connects to.
@@ -375,6 +376,7 @@ impl ConsoleTab {
             stack,
             status,
             error,
+            retry: retry.clone(),
             by_ip,
             ip: RefCell::new(None),
             spinner,
@@ -787,6 +789,11 @@ impl ConsoleTab {
         eprintln!("rustdrac: {host}: {e:#}");
         *self.0.state.borrow_mut() = State::Failed;
         self.0.by_ip.hide();
+        self.0
+            .by_ip
+            .style_context()
+            .remove_class("suggested-action");
+        self.0.retry.style_context().add_class("suggested-action");
         self.0.stack.set_visible_child_name("error");
         let rejected = e
             .chain()
@@ -827,37 +834,20 @@ impl ConsoleTab {
         });
     }
 
-    /// The host name resolved: show the button and ask right away.
+    /// The host name resolved: offer it on the error page (next to the fixes, which stay
+    /// readable and copyable).
     fn offer_ip(&self, ip: &str) {
         *self.0.ip.borrow_mut() = Some(ip.to_string());
         self.0
             .by_ip
             .set_label(&format!("Connect by IP Address ({ip})"));
+        // The IP address is the likely choice now, not Retry.
+        self.0
+            .retry
+            .style_context()
+            .remove_class("suggested-action");
+        self.0.by_ip.style_context().add_class("suggested-action");
         self.0.by_ip.show();
-        let host = self.target().host;
-        let dialog = gtk::MessageDialog::new(
-            self.parent_window().as_ref(),
-            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
-            gtk::MessageType::Question,
-            gtk::ButtonsType::YesNo,
-            &format!(
-                "{host} refused the connection: the iDRAC's Host header check does not know \
-                 that name.\n\nConnect to its IP address {ip} instead?"
-            ),
-        );
-        dialog.set_title("Rust Drac");
-        dialog.set_default_response(gtk::ResponseType::Yes);
-        let weak = self.downgrade();
-        dialog.connect_response(move |dialog, response| {
-            // SAFETY: the dialog is not used after this point.
-            unsafe { dialog.destroy() };
-            if response == gtk::ResponseType::Yes
-                && let Some(tab) = upgrade(&weak)
-            {
-                tab.connect_by_ip();
-            }
-        });
-        dialog.show();
     }
 
     /// Retry with the IP address the button names (the tab keeps its name).

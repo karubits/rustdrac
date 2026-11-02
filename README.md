@@ -159,7 +159,7 @@ On Supermicro servers `service_tag` holds the system serial number.
 
 ### Passwords
 
-Passwords are **never written to the YAML file**. If you tick *Save password in the system keyring*, the password goes into the desktop keyring via Secret Service (GNOME Keyring or KWallet) under the service `rustdrac`, keyed by the connection `id`. Saved passwords don't travel with a copied config file; on a new machine you're asked for each password once.
+Passwords are **never written to the YAML file**. If you tick *Save password in the system keyring*, the password goes into the desktop keyring via Secret Service (GNOME Keyring or KWallet) under the service `rustdrac`, keyed by the connection `id`. Saved passwords don't travel with a copied config file; on a new machine you're asked for each password once. Where no Secret Service is running (WSL, a bare X session, SSH), saving fails with an explanation and the app offers to go on without saving: the password is then asked for when connecting and kept for the session. To get a keyring there, install `gnome-keyring` and run `gnome-keyring-daemon --start --components=secrets` with a D-Bus session bus. On Windows the Credential Manager is used.
 
 ## Settings and About
 

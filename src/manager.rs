@@ -580,23 +580,46 @@ impl Manager {
 
     fn edit(&self, conn: Connection, title: &str) {
         let groups = self.0.store.borrow().groups();
-        let Some((conn, password)) =
+        let Some((mut conn, password)) =
             edit_dialog(self.parent_window().as_ref(), title, conn, &groups)
         else {
             return;
         };
-        let result = (|| -> anyhow::Result<()> {
-            match password {
-                PasswordChange::Keep => {}
-                PasswordChange::Set(p) => conn.set_saved_password(&p)?,
-                PasswordChange::Forget => conn.forget_password(),
+        let parent = self.parent_window();
+        let mut stored = match password {
+            PasswordChange::Keep => Ok(()),
+            PasswordChange::Set(p) => conn.set_saved_password(&p),
+            PasswordChange::Forget => {
+                conn.forget_password();
+                Ok(())
             }
+        };
+        if let Err(e) = &stored
+            && let Some(k) = store::keyring_unavailable(e)
+        {
+            // Offer to keep the entry without the password.
+            if question_dialog(
+                parent.as_ref(),
+                k.summary(),
+                &format!(
+                    "{}\n\nSave the server without its password? It is asked for when connecting.",
+                    k.details()
+                ),
+                "Save Without Password",
+            ) {
+                conn.save_password = false;
+                stored = Ok(());
+            } else {
+                return;
+            }
+        }
+        let result = stored.and_then(|()| {
             let mut store = self.0.store.borrow_mut();
             store.upsert(conn.clone());
             store.save()
-        })();
+        });
         if let Err(e) = result {
-            error_dialog(self.parent_window().as_ref(), &format!("{e:#}"));
+            error_dialog(parent.as_ref(), &format!("{e:#}"));
         }
         self.0.search.set_text("");
         self.refresh();
@@ -854,6 +877,33 @@ fn edit_dialog(
     // SAFETY: the dialog is not used after this point.
     unsafe { dialog.destroy() };
     result
+}
+
+/// A yes/no question with an explanation; `true` when the user chose `yes_label`.
+pub fn question_dialog(
+    parent: Option<&gtk::Window>,
+    msg: &str,
+    question: &str,
+    yes_label: &str,
+) -> bool {
+    let dialog = gtk::MessageDialog::new(
+        parent,
+        gtk::DialogFlags::MODAL,
+        gtk::MessageType::Warning,
+        gtk::ButtonsType::None,
+        msg,
+    );
+    dialog.set_secondary_text(Some(question));
+    dialog.set_title("Rust Drac");
+    dialog.add_buttons(&[
+        ("Cancel", gtk::ResponseType::Cancel),
+        (yes_label, gtk::ResponseType::Accept),
+    ]);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let answer = dialog.run() == gtk::ResponseType::Accept;
+    // SAFETY: the dialog is not used after this point.
+    unsafe { dialog.destroy() };
+    answer
 }
 
 pub fn error_dialog(parent: Option<&gtk::Window>, msg: &str) {
