@@ -865,6 +865,53 @@ pub fn sel_csv(entries: &[SelEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Against a real, unused server: graceful shutdown (force off if that takes too
+    /// long), then power on, reading the state back the way the console tab does.
+    /// `RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored power_off --nocapture`
+    #[test]
+    #[ignore]
+    fn power_off_and_on_a_real_server() {
+        use super::*;
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let client = crate::bmc::http_client().unwrap();
+        let rf = Redfish::new(
+            &client,
+            &var("RUSTDRAC_TEST_HOST"),
+            &var("RUSTDRAC_TEST_USER"),
+            &var("RUSTDRAC_TEST_PASSWORD"),
+        );
+        let started = std::time::Instant::now();
+        let log = |msg: &str| eprintln!("[{:>5.1}s] {msg}", started.elapsed().as_secs_f32());
+        let wait_for = |state: &str, secs: u64| -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_secs(5));
+                let p = rf.power().unwrap();
+                log(&format!("state {}", p.state));
+                if p.state == state {
+                    return true;
+                }
+            }
+            false
+        };
+        let p = rf.power().unwrap();
+        log(&format!("state {}; allowed {:?}", p.state, p.reset_types));
+        assert_eq!(p.state, "On", "the server must be on to start");
+        rf.reset("GracefulShutdown").unwrap();
+        log("GracefulShutdown accepted");
+        if !wait_for("Off", 180) {
+            rf.reset("ForceOff").unwrap();
+            log("ForceOff accepted");
+            assert!(wait_for("Off", 60));
+        }
+        rf.reset("On").unwrap();
+        log("On accepted");
+        assert!(wait_for("On", 90));
+        // The console tab's redundant-action message.
+        let e = rf.reset("On").unwrap_err();
+        log(&format!("second On refused: {e:#}"));
+    }
+
     #[test]
     fn power_info_and_errors_are_parsed() {
         use super::*;
