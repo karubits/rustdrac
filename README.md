@@ -4,7 +4,7 @@
 
 # Rust Drac
 
-**A fast, native Linux and Windows app for Dell iDRAC 8 & 9, Supermicro X11 and AMI MegaRAC (Gigabyte) servers. Made with Rust 🦀**
+**A fast, native Linux and Windows app for Dell iDRAC 8 & 9, Supermicro X11 and AMI MegaRAC (Gigabyte, ASRock Rack) servers. Made with Rust 🦀**
 
 Virtual console in tabs · address book · health & SEL viewer · background alarms.<br>
 No browser, no Java, no login page, no certificate warnings.
@@ -174,7 +174,7 @@ Dark mode is the default: Adwaita dark plus the app's own stylesheet with an ora
 
 ## How it works
 
-The app first checks which web UI the BMC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9) or what it serves there (a Supermicro BMC answers with its login form, which posts to `/cgi/login.cgi`; a MegaRAC serves its single-page app titled "MegaRAC SP-X"), so you never pick the vendor or generation yourself. The result is saved as `vendor:` in the address book, and the Redfish paths follow from it (`Systems/System.Embedded.1` and `Managers/iDRAC.Embedded.1` on Dell, `Systems/1` and `Managers/1` on Supermicro, `Systems/Self` and `Managers/Self` on MegaRAC).
+The app first checks which web UI the BMC runs, from where `/` redirects (`/start.html` on iDRAC 8, `/restgui/start.html` on iDRAC 9) or what it serves there (a Supermicro BMC answers with its login form, which posts to `/cgi/login.cgi`; a MegaRAC serves its single-page app titled "MegaRAC SP-X", or with AMI's logo markup where the title is blank), so you never pick the vendor or generation yourself. The result is saved as `vendor:` in the address book, and the Redfish paths follow from it (`Systems/System.Embedded.1` and `Managers/iDRAC.Embedded.1` on Dell, `Systems/1` and `Managers/1` on Supermicro, `Systems/Self` and `Managers/Self` on MegaRAC).
 
 ### iDRAC 8
 
@@ -204,7 +204,7 @@ Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query
 
 ### AMI MegaRAC (Gigabyte)
 
-Tested on a Gigabyte R181-NA0 with MegaRAC SP-X firmware 12.61. Other AMI-based BMCs with the same web UI should work the same way.
+Tested on a Gigabyte R181-NA0 with MegaRAC SP-X firmware 12.61 and on ASRock Rack 1U4LW-X570/2L2T servers (X570D4U-2L2T board) with BMC firmware 3.09. Other AMI-based BMCs with the same web UI should work the same way; ASRock's build leaves the page title empty, so the detection also accepts AMI's logo markup.
 
 1. **Login.** `POST /api/session` with the user and password as a form, which sets the `QSESSIONID` cookie and returns a CSRF token that every later request repeats in an `X-CSRFTOKEN` header.
 2. **Viewer.** `/viewer.html` is the HTML5 viewer the web UI opens in a popup. It expects what the web UI left in `sessionStorage` (the CSRF token, user name, privilege and the BMC's feature list, which decides the KVM handshake: with `KVM_SESSION_RECONNECT` the KVM service refuses the plain one) and a readable cookie before it fetches its own KVM token and opens a `wss://` WebSocket to `/kvm` on port 443. An injected script seeds those, so the page loads in the embedded web view as if the web UI had opened it.

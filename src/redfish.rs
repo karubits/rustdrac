@@ -92,8 +92,9 @@ pub enum Health {
 
 impl Health {
     pub fn parse(s: Option<&str>) -> Health {
+        // ASRock Rack reports "Normal" where the schema says "OK".
         match s.map(str::to_ascii_lowercase).as_deref() {
-            Some("ok") => Health::Ok,
+            Some("ok" | "normal") => Health::Ok,
             Some("warning") => Health::Warning,
             Some("critical") => Health::Critical,
             _ => Health::Unknown,
@@ -904,14 +905,9 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
     for psu in power["PowerSupplies"].as_array().into_iter().flatten() {
         if let Some(health) = status_health(psu) {
             // Supermicro reports no capacity, but the current output.
-            let watts = psu["PowerCapacityWatts"]
-                .as_f64()
+            let watts = watts_of(&psu["PowerCapacityWatts"])
                 .map(|w| format!("{w:.0} W capacity"))
-                .or_else(|| {
-                    psu["PowerOutputWatts"]
-                        .as_f64()
-                        .map(|w| format!("{w:.0} W output"))
-                })
+                .or_else(|| watts_of(&psu["PowerOutputWatts"]).map(|w| format!("{w:.0} W output")))
                 .unwrap_or_default();
             // AMI lists PSUs without a name, only a member id.
             let mut name = str_field(psu, "Name");
@@ -959,6 +955,18 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
         }
     }
     sensors
+}
+
+/// A wattage, which ASRock Rack reports as a string such as `"450W"`.
+fn watts_of(v: &Value) -> Option<f64> {
+    v.as_f64().or_else(|| {
+        v.as_str()?
+            .trim()
+            .trim_end_matches(['W', 'w'])
+            .trim()
+            .parse()
+            .ok()
+    })
 }
 
 fn thermal_sensors(thermal: &Value) -> Vec<Sensor> {
@@ -1099,6 +1107,22 @@ pub fn sel_csv(entries: &[SelEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn asrock_power_supplies_are_read() {
+        let power = serde_json::json!({"PowerSupplies": [
+            {"Name": "PSU1", "MemberId": "0", "Status": {"Health": "Normal", "State": "Enabled"}, "PowerCapacityWatts": "450W", "PowerOutputWatts": "118W"},
+            {"Name": "PSU2", "MemberId": "1", "Status": {"Health": "Critical", "State": "Enabled"}, "PowerCapacityWatts": 750.0}
+        ]});
+        let sensors = super::power_sensors(&power);
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[0].health, super::Health::Ok);
+        assert_eq!(sensors[0].reading, "450 W capacity");
+        assert_eq!(sensors[1].health, super::Health::Critical);
+        assert_eq!(sensors[1].reading, "750 W capacity");
+        assert_eq!(super::watts_of(&serde_json::json!("abc")), None);
+        assert_eq!(super::Health::parse(Some("NORMAL")), super::Health::Ok);
+    }
+
     #[test]
     fn megarac_paths_are_the_known_ones() {
         let p = super::paths(super::Vendor::MegaRac);

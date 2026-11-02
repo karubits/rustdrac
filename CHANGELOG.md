@@ -4,6 +4,12 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## 2026-11-02 (v0.5.1)
+
+### Added
+- ASRock Rack BMCs (AMI MegaRAC with a blank page title) are detected as MegaRAC too, from AMI's logo markup. Tested on a 1U4LW-X570/2L2T (BMC firmware 3.09): console, power, Health & SEL and log export.
+- Power supplies whose health reads "Normal" and whose wattage is a string such as "450W" (ASRock Rack) show as OK with their capacity instead of Unknown.
+
 ## 2026-11-02 (v0.5.0)
 
 ### Added

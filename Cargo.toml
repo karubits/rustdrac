@@ -1,6 +1,6 @@
 [package]
 name = "rustdrac"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Rust Drac: Dell iDRAC 8/9, Supermicro X11 and AMI MegaRAC (Gigabyte) console launcher, address book, health and SEL viewer"
 license = "MIT"

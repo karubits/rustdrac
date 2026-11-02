@@ -26,7 +26,7 @@ pub enum Vendor {
     #[default]
     Dell,
     Supermicro,
-    /// AMI MegaRAC SP-X, as on Gigabyte servers.
+    /// AMI MegaRAC SP-X, as on Gigabyte and ASRock Rack servers.
     MegaRac,
 }
 
@@ -162,8 +162,9 @@ pub fn cached_vendor(host: &str) -> Option<Vendor> {
 }
 
 /// iDRAC 9 redirects `/` to `/restgui/…`; a Supermicro BMC serves its login form (which posts
-/// to `/cgi/login.cgi`) at `/`; a MegaRAC serves its single-page app, titled "MegaRAC SP-X";
-/// anything else is treated as an iDRAC 8, as before.
+/// to `/cgi/login.cgi`) at `/`; a MegaRAC serves its single-page app, titled "MegaRAC SP-X"
+/// (ASRock Rack leaves the title empty, but the AMI logo and banner markup stay); anything
+/// else is treated as an iDRAC 8, as before.
 fn platform_from(final_path: &str, body: &str) -> Platform {
     if final_path.starts_with("/restgui/") {
         Platform::Idrac(Generation::Idrac9)
@@ -171,7 +172,7 @@ fn platform_from(final_path: &str, body: &str) -> Platform {
         Platform::Supermicro {
             base64_login: body.contains("btoa"),
         }
-    } else if body.contains("MegaRAC") {
+    } else if body.contains("MegaRAC") || (body.contains("ami_logo") && body.contains("h5banner")) {
         Platform::MegaRac
     } else {
         Platform::Idrac(idrac::generation_from_path(final_path))
@@ -386,6 +387,12 @@ mod tests {
     <title>MegaRAC SP-X</title>
     <link rel="stylesheet" href="/styles.min.css">"#;
         assert_eq!(platform_from("/", megarac), Platform::MegaRac);
+        // ASRock Rack: no title, but AMI's logo markup.
+        let asrock = r#"<title></title>
+    <link rel="stylesheet" href="/styles.min.css">
+    <div class="hide" id="ami_logo">
+        <img id="idh5banner_left"  src="images/h5banner_left.png" alt="">"#;
+        assert_eq!(platform_from("/", asrock), Platform::MegaRac);
         assert_eq!(Platform::MegaRac.vendor(), Vendor::MegaRac);
     }
 
