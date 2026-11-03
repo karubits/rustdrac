@@ -231,9 +231,10 @@ pub fn summary_json(c: &Collected, name: &str, host: &str, exported_at: &str) ->
             "health": health_of(n),
         })).collect::<Vec<_>>(),
         "power_supplies": c.power["PowerSupplies"].as_array().into_iter().flatten().filter(|p| enabled(p)).map(|p| json!({
-            "name": s(p, "Name"),
+            "name": redfish::psu_name(p),
             "model": s(p, "Model"),
-            "capacity_w": p["PowerCapacityWatts"],
+            "capacity_w": redfish::watts_of(&p["PowerCapacityWatts"])
+                .map(|w| if w.fract() == 0.0 { json!(w as u64) } else { json!(w) }),
             "firmware": s(p, "FirmwareVersion"),
             "health": health_of(p),
         })).collect::<Vec<_>>(),

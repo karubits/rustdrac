@@ -213,7 +213,11 @@ pub fn console_page(client: &Client, session: &Session) -> ConsolePage {
     let features = project_features(client, session);
     ConsolePage {
         url: format!("https://{}{VIEWER}", session.host),
-        script: console_shim(session, features.as_deref()),
+        script: console_shim(
+            session,
+            features.as_deref(),
+            std::env::var_os("RUSTDRAC_DEBUG").is_some(),
+        ),
         cookies: vec![Cookie {
             name: SESSION_COOKIE.to_string(),
             value: session.cookie.clone(),
@@ -224,10 +228,11 @@ pub fn console_page(client: &Client, session: &Session) -> ConsolePage {
 }
 
 /// What the web UI leaves in `sessionStorage` (and a readable cookie) before it opens the
-/// viewer, which checks `document.cookie` first and then sends the CSRF token (`garc`) with
+/// viewer, which checks `document.cookie` first and then sends the CSRF token (`garc`, from
+/// sessionStorage on firmware 12.x and from the `__Host-garc` cookie on 13.x) with
 /// every request. Chrome goes into the user agent as the viewer prefers it. Without the
 /// feature list the viewer fetches it itself.
-fn console_shim(session: &Session, features: Option<&str>) -> String {
+fn console_shim(session: &Session, features: Option<&str>, debug: bool) -> String {
     let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
     let privilege =
         ["User", "OEM", "Operator", "Administrator"][session.privilege.clamp(1, 4) as usize - 1];
@@ -235,6 +240,12 @@ fn console_shim(session: &Session, features: Option<&str>) -> String {
         r#"(function () {{
     if (window.top !== window) return;
     try {{ document.cookie = "refresh_disable=1"; }} catch (e) {{}}
+    // Firmware 13.04 reads the CSRF token from a cookie (__Host-garc over https), not from
+    // sessionStorage, and logs the session out when it is missing.
+    try {{
+        document.cookie = "__Host-garc=" + encodeURIComponent({csrf}) + "; path=/; secure";
+        document.cookie = "garc=" + encodeURIComponent({csrf}) + "; path=/; secure";
+    }} catch (e) {{}}
     try {{
         var ua = navigator.userAgent;
         if (ua.indexOf("Chrome") === -1) {{
@@ -253,6 +264,39 @@ fn console_shim(session: &Session, features: Option<&str>) -> String {
     s.setItem("vmedia_access", "1");
     s.setItem("extended_privilege", "0");
     if ({features} !== null) s.setItem("features", {features});
+    // Firmware 13.04 opens the viewer with window.open and hands it the KVM flags on the
+    // opener window (CONSTANTS from the feature list, kvm_access, vmedia_access,
+    // privilege_id) and touches the opener's jQuery; it throws without one.
+    try {{
+        var feats = [];
+        try {{
+            feats = JSON.parse(s.getItem("features") || "[]").map(function (f) {{ return f.feature; }});
+        }} catch (e) {{}}
+        var has = function (n) {{ return feats.indexOf(n) !== -1; }};
+        var stub = {{}};
+        var chain = function () {{ return stub; }};
+        ["attr", "removeAttr", "remove", "hide", "show", "html", "text", "val", "prop", "css",
+         "addClass", "removeClass", "find", "trigger", "click", "on", "off", "empty", "append",
+         "parent", "parents", "is", "each"].forEach(function (m) {{ stub[m] = chain; }});
+        var opener = {{
+            CONSTANTS: {{
+                KVM_SESS_RECON_FLG: has("KVM_SESSION_RECONNECT"),
+                CD_SERVER_APP_FLAG: has("CD_SERVER_APP"),
+                VMEDIA_MAX_COUNT_FLAG: has("VMEDIA_MAX_COUNT_FOR_KVM"),
+                HOST_CURSOR_ENABLED_FLAG: has("HOST_CURSOR_ENABLED")
+            }},
+            kvm_access: 1, vmedia_access: 1, privilege_id: {privilege_id},
+            $: chain, jQuery: chain
+        }};
+        window.kvm_access = 1;
+        window.vmedia_access = 1;
+        window.privilege_id = {privilege_id};
+        if (!window.opener) {{
+            try {{ Object.defineProperty(window, "opener", {{ value: opener, configurable: true }}); }}
+            catch (e) {{ window.opener = opener; }}
+        }}
+    }} catch (e) {{}}
+    {debug}
 }})();"#,
         csrf = js(&session.csrf),
         user = js(&session.user),
@@ -260,8 +304,24 @@ fn console_shim(session: &Session, features: Option<&str>) -> String {
         privilege_id = js(&session.privilege.to_string()),
         session_id = js(&session.session_id.to_string()),
         features = features.map_or_else(|| "null".to_string(), js),
+        debug = if debug { DEBUG_RELAY } else { "" },
     )
 }
+
+/// With `RUSTDRAC_DEBUG`, the viewer's script errors and console errors become requests
+/// to `/rustdrac-debug/<message>`, which the request log prints (WebKitGTK exposes no
+/// JavaScript console).
+const DEBUG_RELAY: &str = r#"
+    var relay = function (msg) {
+        try { fetch("/rustdrac-debug/" + encodeURIComponent(String(msg)).slice(0, 1500)); } catch (e) {}
+    };
+    window.addEventListener("error", function (ev) {
+        relay((ev.message || "error") + " @ " + (ev.filename || "") + ":" + (ev.lineno || 0));
+    });
+    window.addEventListener("unhandledrejection", function (ev) { relay("unhandled: " + ev.reason); });
+    var origError = console.error;
+    console.error = function () { relay("console.error: " + Array.prototype.join.call(arguments, " ")); if (origError) origError.apply(console, arguments); };
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -395,7 +455,11 @@ mod tests {
         };
         let page = ConsolePage {
             url: format!("https://{}{VIEWER}", session.host),
-            script: console_shim(&session, Some(r#"[{"feature":"KVM_SESSION_RECONNECT"}]"#)),
+            script: console_shim(
+                &session,
+                Some(r#"[{"feature":"KVM_SESSION_RECONNECT"}]"#),
+                false,
+            ),
             cookies: vec![Cookie {
                 name: SESSION_COOKIE.to_string(),
                 value: session.cookie.clone(),
@@ -423,6 +487,10 @@ mod tests {
                 .contains(r#"s.setItem("username", "oob-admin")"#)
         );
         assert!(page.script.contains("refresh_disable=1"));
+        assert!(
+            page.script
+                .contains(r#"document.cookie = "__Host-garc=" + encodeURIComponent("efqP5dpz") + "; path=/; secure""#)
+        );
         assert!(page.script.contains("Chrome/"));
         let features = r#"[{"feature":"KVM_SESSION_RECONNECT"}]"#;
         let expected = format!(
@@ -430,7 +498,7 @@ mod tests {
             serde_json::to_string(features).unwrap()
         );
         assert!(page.script.contains(&expected), "{}", page.script);
-        let bare = console_shim(&session, None);
+        let bare = console_shim(&session, None, false);
         assert!(bare.contains("if (null !== null)"));
     }
 }

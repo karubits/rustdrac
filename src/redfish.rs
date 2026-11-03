@@ -30,8 +30,8 @@ pub struct Paths {
     /// `?$expand=*($levels=1)` works. Supermicro answers any query string with a redirect
     /// to a mangled URL and then HTTP 501.
     pub expand: bool,
-    /// Page by `$skip` when a page has no `nextLink` (iDRAC 8). Supermicro returns the whole
-    /// collection at once and ignores `$skip`, which would loop.
+    /// Page by `$skip` when a page has no `nextLink` (iDRAC 8, AMI MegaRAC). Supermicro
+    /// returns the whole collection at once and ignores `$skip`, which would loop.
     pub skip_paging: bool,
 }
 
@@ -60,7 +60,9 @@ const SUPERMICRO: Paths = Paths {
 };
 
 /// AMI MegaRAC SP-X (Gigabyte, tested on firmware 12.61): the `Self` singletons; `$expand`
-/// works and SEL pages carry a `nextLink`. The audit log stands in for a lifecycle log.
+/// works. SEL pages carry a `nextLink` on firmware 12.61 but not on 12.60 or 13.04, which
+/// page by 50 and report the page size as the count, so paging goes by `$skip` as well. The
+/// audit log stands in for a lifecycle log.
 const MEGARAC: Paths = Paths {
     system: "/redfish/v1/Systems/Self",
     chassis: "/redfish/v1/Chassis/Self",
@@ -70,7 +72,7 @@ const MEGARAC: Paths = Paths {
     aux_log_service: "/redfish/v1/Managers/Self/LogServices/AuditLog",
     aux_log_entries: Some("/redfish/v1/Managers/Self/LogServices/AuditLog/Entries"),
     expand: true,
-    skip_paging: false,
+    skip_paging: true,
 };
 
 pub fn paths(vendor: Vendor) -> &'static Paths {
@@ -661,15 +663,22 @@ impl Redfish {
             }
             let total = page["Members@odata.count"].as_u64().unwrap_or(0) as usize;
             // An iDRAC 8 pages by $skip and leaves nextLink empty, so page by count as well.
+            // AMI MegaRAC 12.60 and 13.04 do the same but count only the page, so a full
+            // page (count == members) asks for the next one until a page comes back short.
             let next = match page["Members@odata.nextLink"].as_str().map(str::trim) {
                 Some(link) if !link.is_empty() && link != current => link.to_string(),
-                _ if skip_paging && got > 0 && entries.len() < total => {
+                _ if skip_paging && got > 0 && (entries.len() < total || got == total) => {
                     format!("{base}?$skip={}", entries.len())
                 }
                 _ => break,
             };
+            let first_id = page["Members"][0]["Id"].clone();
             current = next;
             page = self.get(&current)?;
+            // A BMC that ignores $skip hands the same page back; stop instead of looping.
+            if !first_id.is_null() && page["Members"][0]["Id"] == first_id {
+                break;
+            }
         }
         Ok(entries)
     }
@@ -828,6 +837,17 @@ fn redfish_error(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
+/// A power supply's name. AMI lists PSUs without one (only a member id), and MegaRAC
+/// 13.04 names them "nil".
+pub fn psu_name(psu: &Value) -> String {
+    let name = str_field(psu, "Name");
+    if name.is_empty() || name.eq_ignore_ascii_case("nil") {
+        format!("PSU {}", str_field(psu, "MemberId"))
+    } else {
+        name
+    }
+}
+
 pub fn str_field(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().trim().to_string()
 }
@@ -909,14 +929,9 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
                 .map(|w| format!("{w:.0} W capacity"))
                 .or_else(|| watts_of(&psu["PowerOutputWatts"]).map(|w| format!("{w:.0} W output")))
                 .unwrap_or_default();
-            // AMI lists PSUs without a name, only a member id.
-            let mut name = str_field(psu, "Name");
-            if name.is_empty() {
-                name = format!("PSU {}", str_field(psu, "MemberId"));
-            }
             sensors.push(Sensor {
                 category: "Power Supply",
-                name,
+                name: psu_name(psu),
                 health,
                 reading: watts,
             });
@@ -958,7 +973,7 @@ fn power_sensors(power: &Value) -> Vec<Sensor> {
 }
 
 /// A wattage, which ASRock Rack reports as a string such as `"450W"`.
-fn watts_of(v: &Value) -> Option<f64> {
+pub fn watts_of(v: &Value) -> Option<f64> {
     v.as_f64().or_else(|| {
         v.as_str()?
             .trim()
@@ -1132,7 +1147,19 @@ mod tests {
             Some("/redfish/v1/Managers/Self/LogServices/SEL/Entries")
         );
         assert!(p.expand);
-        assert!(!p.skip_paging);
+        assert!(p.skip_paging);
+    }
+
+    #[test]
+    fn psus_get_a_name() {
+        let named: serde_json::Value =
+            serde_json::from_str(r#"{"Name": "PS-2801-9L1", "MemberId": "0"}"#).unwrap();
+        assert_eq!(super::psu_name(&named), "PS-2801-9L1");
+        let nil: serde_json::Value =
+            serde_json::from_str(r#"{"Name": "nil", "MemberId": "230"}"#).unwrap();
+        assert_eq!(super::psu_name(&nil), "PSU 230");
+        let none: serde_json::Value = serde_json::from_str(r#"{"MemberId": "1"}"#).unwrap();
+        assert_eq!(super::psu_name(&none), "PSU 1");
     }
 
     #[test]

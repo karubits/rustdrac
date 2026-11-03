@@ -6,7 +6,12 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 
 ## Unreleased
 
+### Added
+- MegaRAC firmware 13.04 (Gigabyte R163-Z32) and 12.60 (R272-Z30): console, Health & SEL and log export verified. The 13.04 viewer takes its CSRF token from a cookie and its KVM flags from the window that opened it, so the console page now seeds both.
+
 ### Fixed
+- MegaRAC: SEL and audit-log pages without a next-link (firmware 12.60 and 13.04 page by 50 and report the page size as the count) are followed by `$skip`, so the Health tab and the export read the whole log instead of the first 50 entries. A BMC that ignores `$skip` and repeats the page stops the walk.
+- Power supplies named "nil" (MegaRAC 13.04) are listed as "PSU <id>"; a PSU capacity given as a string such as "450W" is exported as a number instead of "450W W".
 - MegaRAC: the serial number shown on the console strip and saved to the address book is now the FRU product serial (what the BMC's own FRU page shows). It used to come from the host-interface inventory, which reads "NA" until the host has reported its SMBIOS data, so Gigabyte R181 servers showed "NA" while the BMC knew the serial.
 
 ## 2026-11-02 (v0.5.1)
