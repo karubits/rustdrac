@@ -230,7 +230,7 @@ pub fn summary_json(c: &Collected, name: &str, host: &str, exported_at: &str) ->
             "speed_mbps": n["SpeedMbps"],
             "health": health_of(n),
         })).collect::<Vec<_>>(),
-        "power_supplies": c.power["PowerSupplies"].as_array().into_iter().flatten().filter(|p| enabled(p)).map(|p| json!({
+        "power_supplies": redfish::power_supplies(&c.power).iter().filter(|p| enabled(p)).map(|p| json!({
             "name": redfish::psu_name(p),
             "model": s(p, "Model"),
             "capacity_w": redfish::watts_of(&p["PowerCapacityWatts"])

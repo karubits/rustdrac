@@ -204,7 +204,7 @@ Redfish on an X11 (firmware 1.7x) has no `$expand`, `$top` or `$skip`: any query
 
 ### AMI MegaRAC (Gigabyte)
 
-Tested on Gigabyte R181-NA0 (MegaRAC SP-X firmware 12.61), R272-Z30 (12.60) and R163-Z32 (13.04) servers and on ASRock Rack 1U4LW-X570/2L2T servers (X570D4U-2L2T board) with BMC firmware 3.09. Other AMI-based BMCs with the same web UI should work the same way; ASRock's build leaves the page title empty, so the detection also accepts AMI's logo markup.
+Tested on Gigabyte R181-NA0 (MegaRAC SP-X firmware 12.61), R272-Z30 (12.60 and 12.61) and R163-Z32 (13.04 and 13.06) servers and on ASRock Rack 1U4LW-X570/2L2T servers (X570D4U-2L2T board) with BMC firmware 3.09. Other AMI-based BMCs with the same web UI should work the same way; ASRock's build leaves the page title empty, so the detection also accepts AMI's logo markup.
 
 1. **Login.** `POST /api/session` with the user and password as a form, which sets the `QSESSIONID` cookie and returns a CSRF token that every later request repeats in an `X-CSRFTOKEN` header.
 2. **Viewer.** `/viewer.html` is the HTML5 viewer the web UI opens in a popup. It expects what the web UI left in `sessionStorage` (the CSRF token, user name, privilege and the BMC's feature list, which decides the KVM handshake: with `KVM_SESSION_RECONNECT` the KVM service refuses the plain one) and a readable cookie before it fetches its own KVM token and opens a `wss://` WebSocket to `/kvm` on port 443. An injected script seeds those, so the page loads in the embedded web view as if the web UI had opened it.

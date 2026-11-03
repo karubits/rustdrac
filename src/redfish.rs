@@ -840,12 +840,7 @@ fn redfish_error(status: reqwest::StatusCode, body: &str) -> String {
 /// A power supply's name. AMI lists PSUs without one (only a member id), and MegaRAC
 /// 13.04 names them "nil".
 pub fn psu_name(psu: &Value) -> String {
-    let name = str_field(psu, "Name");
-    if name.is_empty() || name.eq_ignore_ascii_case("nil") {
-        format!("PSU {}", str_field(psu, "MemberId"))
-    } else {
-        name
-    }
+    psu_name_of(psu).unwrap_or_else(|| format!("PSU {}", str_field(psu, "MemberId")))
 }
 
 pub fn str_field(v: &Value, key: &str) -> String {
@@ -920,9 +915,45 @@ fn system_report(system: &Value) -> HealthReport {
     }
 }
 
+/// The power supplies of a Power document, one entry per physical unit. MegaRAC 12.61
+/// lists each PSU twice: an unnamed FRU entry (member 0, 1; sane wattage) and a named
+/// "PSn_Status" sensor entry with the same serial number (on some boards with a garbage
+/// wattage). The two are merged: the first entry's numbers, the sensor's name and status.
+pub fn power_supplies(power: &Value) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for psu in power["PowerSupplies"].as_array().into_iter().flatten() {
+        let serial = str_field(psu, "SerialNumber");
+        let twin = (!serial.is_empty())
+            .then(|| {
+                out.iter_mut()
+                    .find(|p| str_field(p, "SerialNumber") == serial)
+            })
+            .flatten();
+        match twin {
+            Some(first) => {
+                if psu_name_of(first).is_none()
+                    && let Some(name) = psu_name_of(psu)
+                {
+                    first["Name"] = Value::String(name);
+                }
+                if first["Status"]["State"].is_null() && !psu["Status"]["State"].is_null() {
+                    first["Status"] = psu["Status"].clone();
+                }
+            }
+            None => out.push(psu.clone()),
+        }
+    }
+    out
+}
+
+fn psu_name_of(psu: &Value) -> Option<String> {
+    let name = str_field(psu, "Name");
+    (!name.is_empty() && !name.eq_ignore_ascii_case("nil")).then_some(name)
+}
+
 fn power_sensors(power: &Value) -> Vec<Sensor> {
     let mut sensors = Vec::new();
-    for psu in power["PowerSupplies"].as_array().into_iter().flatten() {
+    for psu in &power_supplies(power) {
         if let Some(health) = status_health(psu) {
             // Supermicro reports no capacity, but the current output.
             let watts = watts_of(&psu["PowerCapacityWatts"])
@@ -1148,6 +1179,39 @@ mod tests {
         );
         assert!(p.expand);
         assert!(p.skip_paging);
+    }
+
+    #[test]
+    fn duplicate_psu_entries_are_merged() {
+        // MegaRAC 12.61 on a Gigabyte R181: FRU entries plus "PSn_Status" sensor entries.
+        let power: serde_json::Value = serde_json::from_str(
+            r#"{"PowerSupplies": [
+                {"MemberId": "0", "Name": null, "Model": "DPS-1200AB-4 E", "SerialNumber": "ISBD2113001934", "PowerCapacityWatts": 1200, "Status": {"Health": "OK", "State": null}},
+                {"MemberId": "1", "Name": null, "Model": "DPS-1200AB-4 E", "SerialNumber": "ISBD2113001939", "PowerCapacityWatts": 1200, "Status": {"Health": "OK", "State": null}},
+                {"MemberId": "2", "Name": "PS1_Status", "Model": "DPS-1200AB-4 E", "SerialNumber": "ISBD2113001934", "PowerCapacityWatts": 64688, "Status": {"Health": "OK", "State": "Enabled"}},
+                {"MemberId": "3", "Name": "PS2_Status", "Model": "DPS-1200AB-4 E", "SerialNumber": "ISBD2113001939", "PowerCapacityWatts": 64688, "Status": {"Health": "Critical", "State": "Enabled"}}
+            ]}"#,
+        )
+        .unwrap();
+        let psus = super::power_supplies(&power);
+        assert_eq!(psus.len(), 2);
+        assert_eq!(psus[0]["Name"], "PS1_Status");
+        assert_eq!(psus[0]["PowerCapacityWatts"], 1200);
+        assert_eq!(psus[0]["Status"]["State"], "Enabled");
+        assert_eq!(psus[1]["Status"]["Health"], "Critical");
+        let sensors = super::power_sensors(&power);
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[0].name, "PS1_Status");
+        assert_eq!(sensors[0].reading, "1200 W capacity");
+        // Entries without a serial number (MegaRAC 13.x) stay separate.
+        let bare: serde_json::Value = serde_json::from_str(
+            r#"{"PowerSupplies": [
+                {"MemberId": "0", "Name": "PS1_Status", "SerialNumber": null, "Status": {"Health": "OK", "State": "Enabled"}},
+                {"MemberId": "1", "Name": "PS2_Status", "SerialNumber": null, "Status": {"Health": "OK", "State": "Enabled"}}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(super::power_supplies(&bare).len(), 2);
     }
 
     #[test]

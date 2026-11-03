@@ -4,6 +4,11 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## Unreleased
+
+### Fixed
+- MegaRAC 12.61 lists every power supply twice (an unnamed FRU entry and a "PSn_Status" sensor entry with the same serial number, the latter with a garbage wattage on the R181). The Health tab and the export now show each unit once, with the sensor's name and the FRU entry's wattage. Verified on Gigabyte R163-Z32 (firmware 13.06) and R272-Z30 (12.61).
+
 ## 2026-11-03 (v0.5.2)
 
 ### Added
