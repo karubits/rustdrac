@@ -337,9 +337,8 @@ pub fn identity(
         model: redfish::str_field(&sys, "Model"),
         power,
     };
-    if let Session::MegaRac(s) = session
-        && let Ok((model, serial)) = megarac::system_info(client, s)
-    {
+    if let Session::MegaRac(s) = session {
+        let (model, serial) = megarac::identity(client, s);
         if !model.is_empty() {
             identity.model = model;
         }

@@ -4,6 +4,11 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
+## Unreleased
+
+### Fixed
+- MegaRAC: the serial number shown on the console strip and saved to the address book is now the FRU product serial (what the BMC's own FRU page shows). It used to come from the host-interface inventory, which reads "NA" until the host has reported its SMBIOS data, so Gigabyte R181 servers showed "NA" while the BMC knew the serial.
+
 ## 2026-11-02 (v0.5.1)
 
 ### Added

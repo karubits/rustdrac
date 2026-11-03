@@ -24,6 +24,7 @@ pub const SESSION_COOKIE: &str = "QSESSIONID";
 const SESSION: &str = "/api/session";
 const VIEWER: &str = "/viewer.html";
 const SYSTEM_INFO: &str = "/api/host_inventory/host_interface_system_info";
+const FRU: &str = "/api/fru";
 const PROJECT: &str = "/api/configuration/project";
 
 /// An authenticated web session.
@@ -120,26 +121,68 @@ pub fn logout(client: &Client, session: &Session) -> Result<()> {
 }
 
 /// The system's model and serial number from the web API: this firmware's Redfish has no
-/// usable serial (`SerialNumber` is null and `SKU` is the SDR version).
-pub fn system_info(client: &Client, session: &Session) -> Result<(String, String)> {
-    let doc: Value = authed(
-        client.get(format!("https://{}{SYSTEM_INFO}", session.host)),
+/// usable serial (`SerialNumber` is null, `SKU` is the SDR version and the chassis serial
+/// is a placeholder). The FRU product record is what the BMC's own FRU page shows and is
+/// always filled in; the host-interface inventory reads "NA" until the host has reported
+/// its SMBIOS data, so it only fills what the FRU leaves empty.
+pub fn identity(client: &Client, session: &Session) -> (String, String) {
+    let (mut model, mut serial) = get_json(client, session, FRU, "reading the FRU")
+        .map(|doc| fru_product_from(&doc))
+        .unwrap_or_default();
+    if (model.is_empty() || serial.is_empty())
+        && let Ok(doc) = get_json(client, session, SYSTEM_INFO, "reading the system info")
+    {
+        let (m, s) = system_info_from(&doc);
+        if model.is_empty() {
+            model = m;
+        }
+        if serial.is_empty() {
+            serial = s;
+        }
+    }
+    (model, serial)
+}
+
+fn get_json(client: &Client, session: &Session, path: &str, what: &str) -> Result<Value> {
+    authed(
+        client.get(format!("https://{}{path}", session.host)),
         session,
     )
     .timeout(Duration::from_secs(10))
     .send()
-    .context("reading the system info")?
+    .context(what.to_string())?
     .error_for_status()
-    .context("reading the system info")?
+    .context(what.to_string())?
     .json()
-    .context("reading the system info")?;
-    Ok(system_info_from(&doc))
+    .context(what.to_string())
+}
+
+/// `(product_name, serial_number)` of the first FRU's product record.
+fn fru_product_from(doc: &Value) -> (String, String) {
+    let product = &doc.as_array().and_then(|a| a.first()).unwrap_or(doc)["product"];
+    (
+        real(product["product_name"].as_str()),
+        real(product["serial_number"].as_str()),
+    )
 }
 
 fn system_info_from(doc: &Value) -> (String, String) {
     let sys = doc.as_array().and_then(|a| a.first()).unwrap_or(doc);
-    let field = |k: &str| sys[k].as_str().unwrap_or_default().trim().to_string();
-    (field("Model"), field("SerialNumber"))
+    (
+        real(sys["Model"].as_str()),
+        real(sys["SerialNumber"].as_str()),
+    )
+}
+
+/// A field's value, or empty for the placeholders a BMC puts where it knows nothing.
+fn real(value: Option<&str>) -> String {
+    let v = value.unwrap_or_default().trim();
+    let placeholder = ["NA", "N/A", "Unknown", "None", "To be filled by O.E.M."];
+    if placeholder.iter().any(|p| p.eq_ignore_ascii_case(v)) {
+        String::new()
+    } else {
+        v.to_string()
+    }
 }
 
 /// The BMC's feature list (`[{"feature": "KVM_SESSION_RECONNECT"}, …]`) as the web UI
@@ -290,6 +333,54 @@ mod tests {
             system_info_from(&Value::Null),
             (String::new(), String::new())
         );
+        // The host has not reported its SMBIOS data yet.
+        let doc: Value =
+            serde_json::from_str(r#"[ { "Model": "R181-NA0-00", "SerialNumber": "NA" } ]"#)
+                .unwrap();
+        assert_eq!(
+            system_info_from(&doc),
+            ("R181-NA0-00".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn fru_product_gives_the_system_serial() {
+        let doc: Value = serde_json::from_str(
+            r#"[ { "device": { "id": 0, "name": "FRU" },
+                   "chassis": { "serial_number": "01234567890123456789AB" },
+                   "board": { "product_name": "MR91-FS0-00", "serial_number": "KN9N7800055" },
+                   "product": { "manufacturer": "GIGABYTE", "product_name": "R181-NA0-00",
+                                "serial_number": "GKHAN1721A0005", "asset_tag": "01234567890123456789AB" } } ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fru_product_from(&doc),
+            ("R181-NA0-00".to_string(), "GKHAN1721A0005".to_string())
+        );
+        assert_eq!(
+            fru_product_from(&Value::Null),
+            (String::new(), String::new())
+        );
+    }
+
+    /// `RUSTDRAC_TEST_HOST=… RUSTDRAC_TEST_USER=… RUSTDRAC_TEST_PASSWORD=… cargo test -- --ignored identity_from_a_real_bmc --nocapture`
+    #[test]
+    #[ignore]
+    fn identity_from_a_real_bmc() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("set {k}"));
+        let client = crate::bmc::http_client().unwrap();
+        let session = login(
+            &client,
+            &var("RUSTDRAC_TEST_HOST"),
+            &var("RUSTDRAC_TEST_USER"),
+            &var("RUSTDRAC_TEST_PASSWORD"),
+        )
+        .unwrap();
+        let (model, serial) = identity(&client, &session);
+        logout(&client, &session).unwrap();
+        println!("model {model:?} serial {serial:?}");
+        assert!(!model.is_empty());
+        assert!(!serial.is_empty());
     }
 
     #[test]
