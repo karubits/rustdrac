@@ -71,7 +71,24 @@ The configuration should then read:
 - Five failed logins lock the account for 30 seconds (`AccountLockoutThreshold` /
   `AccountLockoutDuration` in `/redfish/v1/AccountService`), so wait before retrying.
 - The `admin` account is disabled on some installations ("Enable User Access" in the web
-  UI's user editor); enable it there, or use another account that works over Redfish.
-- If the factory `admin` account is unusable too, `/redfish/v1/Managers/Self/Actions/Oem/AMIManager.RedfishDBReset`
-  (`{"RedfishDBResetType": "ResetAll"}`) rebuilds the Redfish store, at the cost of every
-  Redfish-side setting (subscriptions, certificates). Try PAM first.
+  UI's user editor), usually with a password nobody remembers. Enable it there **and set a
+  new password** in the same save: the editor writes the password into the Redfish store
+  for the factory account, so `admin` works over Redfish right away. Run the PATCH above as
+  `admin`, then disable the account again. The BMC refuses to re-set the password an
+  account already has (`Error in modifying user password, attempt to set previous
+  password`, code 19000), so re-saving a user with its current password does not re-sync it.
+- On one BMC (its `admin` had been re-created later than on its siblings) the password set
+  in the editor never reached the Redfish store: IPMI accepted the new password, Redfish
+  kept answering `401`, and no account could log in over Redfish at all. A BMC cold reset
+  changed nothing. What fixed it was rebuilding the Redfish store from the web UI:
+  **Maintenance → Preserve Configuration**, tick everything *except* Redfish, then
+  **Maintenance → Restore Factory Defaults** (ticked items are the ones *kept*; the page
+  shows the preserve list). The BMC restarts (about two minutes), re-syncs the accounts
+  from IPMI with their current passwords, and every web-UI user then works over Redfish
+  even with PAM off. Over the API that is `PUT /api/maintenance/preserve` and
+  `PUT /api/maintenance/restore_defaults`, both with
+  `{"id":1,"sdr":1,"fru":1,"sel":1,"ipmi":1,"network":1,"ntp":1,"snmp":1,"ssh":1,"kvm":1,"authentication":1,"syslog":1,"web":1,"redfish":0}`.
+  Where some Redfish account still works,
+  `/redfish/v1/Managers/Self/Actions/Oem/AMIManager.RedfishDBReset`
+  (`{"RedfishDBResetType": "ResetAll"}`) does the same without the web UI. Both discard
+  every Redfish-side setting (subscriptions, certificates, the audit log). Try PAM first.
