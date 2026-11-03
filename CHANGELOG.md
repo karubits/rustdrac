@@ -4,7 +4,7 @@ All notable changes to Rust Drac are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Each release tag
 (`vX.Y.Z`) corresponds to the dated section it was cut from.
 
-## Unreleased
+## 2026-11-03 (v0.5.2)
 
 ### Added
 - MegaRAC firmware 13.04 (Gigabyte R163-Z32) and 12.60 (R272-Z30): console, Health & SEL and log export verified. The 13.04 viewer takes its CSRF token from a cookie and its KVM flags from the window that opened it, so the console page now seeds both.
