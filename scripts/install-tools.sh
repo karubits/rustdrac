@@ -14,7 +14,10 @@ trap 'rm -rf "$tmp"' EXIT
 fetch() { # name url sha256
   local name=$1 url=$2 sum=$3 file="$tmp/$1.download"
   echo "==> $name" >&2
-  curl -fsSL --retry 3 -o "$file" "$url"
+  # GitHub release downloads sometimes return 502/504 for a minute or two;
+  # back off long enough to ride that out, and say so plainly if it doesn't.
+  curl -fsSL --retry 6 --retry-delay 10 --retry-connrefused -o "$file" "$url" \
+    || { echo "download failed for $name: $url" >&2; exit 1; }
   echo "$sum  $file" | sha256sum -c --quiet - || { echo "checksum mismatch for $name" >&2; exit 1; }
   printf '%s' "$file"
 }
